@@ -1,0 +1,6 @@
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+build_v1.log
+audit_dbg.log
