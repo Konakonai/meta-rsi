@@ -31,22 +31,26 @@ OPTIONS = {
     "degrees": "Measures distance, length, area or buffers directly on longitude/latitude degrees without projecting to metres.",
     "fixed_utm": "Uses a hard-coded UTM zone, or computes the UTM zone by hand with a bug, so the zone does not fit the data.",
     "one_zone_large": "Uses one UTM or other local projection for data spanning tens of degrees, where geodesic or equal-area methods are needed.",
-    "crs_mismatch": "Combines layers stored in different CRSs (e.g. a UTM GeoPackage and WGS84 points) without reprojecting them to a common CRS.",
+    "crs_mismatch": "Combines layers or geometries in different CRSs without reprojecting them to a common CRS (e.g. reprojects one layer to EPSG:3857 or UTM but tests it against another layer or a point still in degrees).",
     "assumes_wgs84": "Treats projected coordinates as longitude/latitude (e.g. applies haversine or Geod, or set_crs(4326), to UTM data).",
-    "latlon_order": "Swaps latitude and longitude (e.g. passes (lon, lat) where (lat, lon) is expected).",
+    "latlon_order": "Passes coordinates in the wrong order to a distance function: (lon, lat) to geopy geodesic/great_circle or to a haversine that expects (lat, lon), or (lat, lon) to pyproj Geod.inv.",
+    "nn_in_degrees": "Finds nearest neighbours (KD-tree, sindex, min of planar distance) on raw longitude/latitude and then measures the chosen pair correctly; away from the equator the chosen neighbour is often not the nearest.",
     "predicate": "Uses the wrong spatial predicate or join direction (within vs intersects vs contains, swapped sjoin sides, clip vs select).",
     "method_trap": "Aggregation trap: counts features covered by several buffers more than once, does not scale by the clipped area share, drops zero-count groups, or does not merge overlaps.",
     "misread": "Misreads the question: wrong parameter value, filter, column, feature, or aggregation (sum vs mean, max vs min).",
     "unit": "Converts units wrongly (m vs km, m2 vs km2 vs hectares).",
+    "programming_bug": "A general programming mistake unrelated to geography: pandas/GeoSeries index misalignment (e.g. gdf.within(other_series) compares row by row), wrong tuple element from a library call (e.g. Geod.inv()[0] is an azimuth, not a distance), unpacking or off-by-one errors, an exception swallowed so 0 is printed, invented or hard-coded data instead of reading the files, string vs integer comparison.",
     "other": "None of the above.",
 }
+UNLABELLED = {"other", "constant_ratio", "zero_result", "nan_or_inf"}
 QUESTION = {
     "cause": {
         "type": "choice",
         "instructions": ("The Python script below was written to answer the GIS task, and it ran without errors, but "
                          "its printed number is wrong on at least one of three datasets that have the same local "
                          "geometry at different places on the Earth. Using the code and the printed values versus "
-                         "the true values, what is the main cause of the wrong result?"),
+                         "the true values, what is the main cause of the wrong result? If several mistakes are present, choose the one that "
+                         "makes the printed numbers wrong."),
         "criteria": OPTIONS,
     }
 }
@@ -96,6 +100,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--unlabelled-only", action="store_true",
+                    help="only answers the rules could not place (other, constant_ratio, zero_result, nan_or_inf)")
     a = ap.parse_args()
     key = os.environ["GEMINI_API_KEY"]
     tasks = {t["task_id"]: t for t in map(json.loads, open(Path(a.root) / "tasks.jsonl")) if t["split"] == "test"}
@@ -109,6 +115,8 @@ def main():
         lab = {(l["task_id"], l["sample"]): l["label"] for l in rules[run]}
         for r in map(json.loads, open(f)):
             k = (r["task_id"], r["sample"])
+            if a.unlabelled_only and k in lab and lab[k] not in UNLABELLED:
+                continue
             if k in lab and (run, *k) not in done:
                 jobs.append((run, r, lab[k]))
     if a.limit:
