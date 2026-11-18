@@ -9,6 +9,8 @@ same three datasets ("fingerprints"):
   fixed_utm       a UTM zone hard-coded in the script (EPSG parsed from the code)
   one_utm_large   estimate_utm_crs() on a large-extent task (one zone over tens of degrees)
   unit            right method, answer off by a power of ten (unit conversion)
+  latlon_order    point distances with latitude and longitude swapped (e.g. (lon, lat) passed to geopy)
+  nn_in_degrees   nearest neighbour found by planar search on lon/lat, then measured on the sphere
 
 An answer matches a method when it is within 1% of that method's value on every variant (counts
 exactly). Answers matching none are split by the spread of value/truth across variants:
@@ -35,7 +37,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gsb.audit import NonFinite, guarded  # noqa: E402
 from gsb.build import read_layers  # noqa: E402
-from gsb.families import BY_NAME  # noqa: E402
+from gsb.families import BY_NAME, conv  # noqa: E402
 from gsb.harness import extract_code, matches  # noqa: E402
 
 EPSG_UTM = re.compile(r"(?:EPSG:|epsg:|epsg=|EPSG=|crs=|to_crs\()?\b(32[67](?:0[1-9]|[1-5]\d|60))\b")
@@ -67,6 +69,91 @@ def ident(g):  # no reprojection: work in whatever CRS the file was stored in
     return g
 
 
+# ---------- point-distance fingerprints: latitude/longitude swapped, nearest neighbour searched in degrees ----------
+
+R_EARTH = 6371008.8
+POINT_FAMILIES = {"count_within", "sum_within", "mean_nn_distance", "max_pair_distance", "nearest_facility_max",
+                  "centroid_distance", "large_route_length", "covered_population"}
+
+
+def _lonlat(g):
+    ll = g.to_crs("EPSG:4326") if g.crs is not None else g
+    geom = ll.geometry.centroid if not (ll.geom_type == "Point").all() else ll.geometry
+    return np.asarray(geom.x, float), np.asarray(geom.y, float)
+
+
+def _hav(lon1, lat1, lon2, lat2, swap):
+    """Great-circle distance matrix (metres). swap=True reads each longitude as a latitude and vice versa."""
+    if swap:
+        lon1, lat1, lon2, lat2 = lat1, lon1, lat2, lon2
+    p1, p2 = np.radians(lat1)[:, None], np.radians(lat2)[None, :]
+    dl = np.radians(lon2)[None, :] - np.radians(lon1)[:, None]
+    a = np.sin((p2 - p1) / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    return 2 * R_EARTH * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def _nearest(lon1, lat1, lon2, lat2, swap, deg_search, same):
+    """Distance from each point of set 1 to its nearest point of set 2, by exact search or by planar search on degrees."""
+    d = _hav(lon1, lat1, lon2, lat2, swap)
+    if same:
+        np.fill_diagonal(d, np.inf)
+    if not deg_search:
+        return d.min(1)
+    planar = (lon1[:, None] - lon2[None]) ** 2 + (lat1[:, None] - lat2[None]) ** 2
+    if same:
+        np.fill_diagonal(planar, np.inf)
+    return d[np.arange(len(lon1)), planar.argmin(1)]
+
+
+def solve_points(fam, layers, p, swap, deg_search):
+    if fam == "count_within" or fam == "sum_within":
+        g = layers[p["stem"]]
+        x, y = _lonlat(g)
+        k = int(np.flatnonzero(np.asarray(g["id"]) == p["k"])[0])
+        near = _hav(x[[k]], y[[k]], x, y, swap)[0] <= p["d"]
+        return float(near.sum()) if fam == "count_within" else float(np.asarray(g[p["col"]])[near].sum())
+    if fam == "mean_nn_distance":
+        x, y = _lonlat(layers[p["stem"]])
+        return conv(_nearest(x, y, x, y, swap, deg_search, True).mean(), p["unit"])
+    if fam == "max_pair_distance":
+        x, y = _lonlat(layers[p["stem"]])
+        return conv(_hav(x, y, x, y, swap).max(), p["unit"])
+    if fam == "nearest_facility_max":
+        hx, hy = _lonlat(layers[p["homes"]])
+        fx, fy = _lonlat(layers[p["fac"]])
+        d = _nearest(hx, hy, fx, fy, swap, deg_search, False)
+        return conv(d.max() if p["stat"] == "max" else d.mean(), p["unit"])
+    if fam == "centroid_distance":
+        g = layers["districts"]
+        ll = g.to_crs("EPSG:4326")
+        ca = ll.loc[ll["name"] == p["a"]].geometry.iloc[0].centroid
+        cb = ll.loc[ll["name"] == p["b"]].geometry.iloc[0].centroid
+        return conv(_hav(np.array([ca.x]), np.array([ca.y]), np.array([cb.x]), np.array([cb.y]), swap)[0, 0], p["unit"])
+    if fam == "large_route_length":
+        g = layers["cities"].sort_values("seq")
+        x, y = _lonlat(g)
+        d = _hav(x, y, x, y, swap)
+        return float((np.diag(d, 1).sum() if p["stat"] == "route" else d.max()) * 1e-3)
+    if fam == "covered_population":
+        sx, sy = _lonlat(layers[p["stem"]])
+        c = layers["communities"]
+        cx, cy = _lonlat(c)
+        near = _nearest(cx, cy, sx, sy, swap, deg_search, False) <= p["d"]
+        return float(np.asarray(c["pop"])[near].sum())
+    raise KeyError(fam)
+
+
+def solve_points_all(task, root, swap, deg_search):
+    out = {}
+    for v, info in task["variants"].items():
+        layers = read_layers(root / info["dir"], task["files"])
+        try:
+            out[v] = solve_points(task["family"], layers, task["params"], swap, deg_search)
+        except Exception:  # noqa: BLE001
+            out[v] = None
+    return out
+
+
 def fingerprints(task, root):
     fp = {"webmercator": solve_all(task, root, lambda L: (lambda g: g.to_crs("EPSG:3857"))),
           "degrees": solve_all(task, root, lambda L: ident)}
@@ -75,6 +162,11 @@ def fingerprints(task, root):
             crs = next(iter(L.values())).estimate_utm_crs()
             return lambda g: g.to_crs(crs)
         fp["one_utm_large"] = solve_all(task, root, one_utm)
+    if task["family"] in POINT_FAMILIES:
+        fp["latlon_order"] = solve_points_all(task, root, swap=True, deg_search=False)
+        if task["family"] in ("mean_nn_distance", "nearest_facility_max", "covered_population"):
+            fp["latlon_order:deg_search"] = solve_points_all(task, root, swap=True, deg_search=True)
+            fp["nn_in_degrees"] = solve_points_all(task, root, swap=False, deg_search=True)
     return fp
 
 

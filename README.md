@@ -12,7 +12,7 @@ This catches methods that are right only by location, for example measuring in E
 - `gsb/harness.py`: extracts code from a model answer, runs it on the three variants, classifies the result.
 - `gsb/audit.py`: re-solves every task with known right and wrong methods to show what the scoring can catch.
 - `scripts/zero_shot.py`: samples answers with vLLM and scores them.
-- `scripts/classify_errors.py`: labels silent_wrong / lucky answers by matching them against re-solved wrong methods (EPSG:3857, degrees, fixed UTM zone, one zone over a large extent, unit factor).
+- `scripts/classify_errors.py`: labels silent_wrong / lucky answers by matching them against re-solved wrong methods (EPSG:3857, degrees, fixed UTM zone, one zone over a large extent, unit factor, and for point-distance tasks latitude/longitude swapped and nearest neighbour searched on degrees).
 - `scripts/classify_llm.py`: labels the same answers with the Gemini Decisions API (`GEMINI_API_KEY`), for agreement with the rules and for answers the rules cannot place.
 
 ## Variants
