@@ -25,7 +25,9 @@ This catches methods that are right only by location, for example measuring in E
 
 Large-extent families use `low` (±5°), `mid` (±28–40°) and `zone_edge` (±28–40°, on a zone boundary), shift degree-based geometry instead of projecting it, and take ground truth from `pyproj.Geod` (ellipsoidal area and distance).
 
-Ground truth for local families is computed in an azimuthal equidistant CRS centered on the data.
+Local families build geometry in metres on a plane and place it on the WGS84 ellipsoid with an inverse azimuthal equidistant (AEQD) projection centred on the variant's center.
+Ground truth is the planar measure after re-projecting the data to an AEQD projection centred on its bounding box; distance thresholds are applied in the same projection.
+Over these extents (under about 30 km) this agrees with ellipsoidal geodesic measures on WGS84 to within 0.0001% for area, length and point distance (`scripts/check_aeqd_truth.py`, 1,000 shapes at latitudes 0–64°), far below the 1% tolerance.
 The prompt never states the location or CRS. GeoPackage layers are stored in a local UTM CRS in 25% of tasks, and point layers can be CSV with `lon`/`lat` columns.
 
 ## Families
