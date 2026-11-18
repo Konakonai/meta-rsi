@@ -5,7 +5,8 @@
 
 Sampling uses the model's own generation defaults (temperature, top_p, top_k); only n and
 max_tokens are set here. `--hint 1` appends an accuracy requirement to every prompt (the
-prompt-only baseline). `--completions file.jsonl` re-scores saved answers without a GPU.
+prompt-only baseline); `--hint 2` appends the same requirement plus explicit CRS and geodesic
+rules (does the model lack the rules, or fail to apply them). `--completions file.jsonl` re-scores saved answers without a GPU.
 """
 from __future__ import annotations
 
@@ -21,6 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gsb.harness import extract_code, score  # noqa: E402
 
 HINT = "\nDistances, lengths and areas must be accurate to within 1%, wherever the data is on the Earth."
+RULES = """
+Rules for coordinate systems:
+- Check the CRS of every input layer and bring all layers to one CRS before combining them.
+- Do not measure distances, lengths or areas in degrees (EPSG:4326) or in Web Mercator (EPSG:3857).
+- If the data spans less than 6 degrees of longitude, project every layer to the UTM CRS returned by `gdf.estimate_utm_crs()` and measure there.
+- If the data spans more than 6 degrees, measure on the ellipsoid with `pyproj.Geod(ellps="WGS84")` (`inv`, `geometry_length`, `geometry_area_perimeter`), or use an equal-area projection for areas."""
+HINTS = {0: "", 1: HINT, 2: HINT + RULES}
 CATS = ["correct", "lucky", "silent_wrong", "error", "no_code", "no_answer"]
 
 
@@ -32,7 +40,7 @@ def generate(tasks, a):
     kw = {"enable_thinking": bool(a.think)}
     if a.effort:
         kw["reasoning_effort"] = a.effort
-    prompts = [tok.apply_chat_template([{"role": "user", "content": t["prompt"] + (HINT if a.hint else "")}],
+    prompts = [tok.apply_chat_template([{"role": "user", "content": t["prompt"] + HINTS[a.hint]}],
                                        tokenize=False, add_generation_prompt=True, **kw) for t in tasks]
     llm = LLM(model=a.model, max_model_len=a.max_tokens + 1024, gpu_memory_utilization=a.gpu_mem,
               max_num_seqs=a.max_seqs)  # hybrid models (Qwen3.8 DeltaNet) need one state block per sequence
@@ -104,7 +112,7 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=4096)
     ap.add_argument("--think", type=int, default=1)
     ap.add_argument("--effort", default=None)
-    ap.add_argument("--hint", type=int, default=0)
+    ap.add_argument("--hint", type=int, default=0, choices=sorted(HINTS))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--gpu-mem", type=float, default=0.9)
     ap.add_argument("--max-seqs", type=int, default=256)
