@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meta-rsi"
+version = "0.2.0"
+description = "Metamorphic-Gated Recursive Self-Improvement for Geospatial Analysis LLM Agents"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+dependencies = [
+    "geopandas",
+    "numpy",
+    "pandas",
+    "pyogrio",
+    "pyproj",
+    "scipy",
+    "shapely",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+meta-rsi-evolve = "meta_rsi.evolve:main"
+meta-rsi-eval = "meta_rsi.eval.eval_test:main"
+meta-rsi-eval-ood = "meta_rsi.eval.eval_ood:main"
+meta-rsi-analysis = "meta_rsi.eval.analysis:main"
+
+[tool.setuptools.packages.find]
+include = ["meta_rsi*", "benchmarks*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,326 @@
+"""Unit and end-to-end tests for meta_rsi (metamorphic invariance, gating, sandbox, mock evolution)."""
+from __future__ import annotations
+
+import json
+import tarfile
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from benchmarks.gsb.build import read_layers, reference_proj
+from benchmarks.gsb.families import BY_NAME
+from benchmarks.gsb.harness import matches
+from meta_rsi.archive import ArchiveEntry, evaluate_gate
+from meta_rsi.evaluator import _run_metamorphic_check, load_task_splits
+from meta_rsi.evolve import run_evolution
+from meta_rsi.infra.colab_g4 import pack_bundle
+from meta_rsi.llm import LLMClient
+from meta_rsi.metamorphic import perturb_workspace
+from meta_rsi.sandbox import run_python_sandbox, validate_harness_source
+
+DATA_ROOT = Path(__file__).resolve().parents[1] / "data" / "v1"
+
+
+def test_metamorphic_preserves_ground_truth_across_all_21_families():
+    """Label-free perturbation T(low) MUST keep ground-truth answers invariant on all 21 families."""
+    tasks = [json.loads(line) for line in open(DATA_ROOT / "tasks.jsonl")]
+    seen = {}
+    for t in tasks:
+        if t["family"] not in seen:
+            seen[t["family"]] = t
+    assert len(seen) == 21
+
+    for fam_name, task in sorted(seen.items()):
+        fam = BY_NAME[fam_name]
+        low_info = task["variants"]["low"]
+        low_dir = DATA_ROOT / low_info["dir"]
+        with tempfile.TemporaryDirectory() as tmp:
+            pert_dir = Path(tmp) / "pert"
+            perturb_workspace(low_dir, pert_dir, target_lat=58.3, target_lon=6.0, shuffle_rows=True, seed=7)
+            layers = read_layers(pert_dir, task["files"])
+            proj = None if fam.large else reference_proj(layers)
+            val = fam.solve(layers, proj, task["params"])
+        assert matches(val, low_info["truth"], task["answer"]), (
+            f"Invariance broken on {fam_name}: orig={low_info['truth']}, pert={val}"
+        )
+
+
+def test_metamorphic_catches_webmercator_without_ground_truth():
+    """On a local task near the equator, EPSG:3857 passes `low` truth, yet breaks invariance on T(low)."""
+    tasks = [json.loads(line) for line in open(DATA_ROOT / "tasks.jsonl")]
+    t = next(
+        x
+        for x in tasks
+        if x["family"] == "area_by_class"
+        and x["split"] == "train"
+        and abs(x["variants"]["low"]["lat"]) < 2.5
+    )
+    fam = BY_NAME[t["family"]]
+    low_dir = DATA_ROOT / t["variants"]["low"]["dir"]
+    orig_layers = read_layers(low_dir, t["files"])
+    wm_orig = fam.solve(orig_layers, lambda g: g.to_crs("EPSG:3857"), t["params"])
+    # Near equator, EPSG:3857 passes the weak `low` check!
+    assert matches(wm_orig, t["variants"]["low"]["truth"], t["answer"])
+
+    # Under label-free T(low), EPSG:3857 diverges wildly (>3x) -> caught with ZERO labels!
+    with tempfile.TemporaryDirectory() as tmp:
+        pert_dir = Path(tmp) / "pert"
+        perturb_workspace(low_dir, pert_dir, target_lat=58.3, target_lon=6.0)
+        pert_layers = read_layers(pert_dir, t["files"])
+        wm_pert = fam.solve(pert_layers, lambda g: g.to_crs("EPSG:3857"), t["params"])
+    assert not matches(wm_pert, wm_orig, t["answer"])
+    assert wm_pert / wm_orig > 2.5
+
+
+def test_validate_harness_source_security_and_contract():
+    good = "from pathlib import Path\ndef solve(task_prompt, work_dir, llm_call, run_python):\n    return {'code': None, 'trace': [], 'turns': 0}\n"
+    assert validate_harness_source(good)[0]
+
+    bad_net = "import socket\ndef solve(a, b, c, d): return {}\n"
+    assert not validate_harness_source(bad_net)[0]
+
+    bad_eval = "def solve(a, b, c, d):\n    eval('1')\n    return {}\n"
+    assert not validate_harness_source(bad_eval)[0]
+
+    bad_sig = "def solve(a, b): return {}\n"
+    assert not validate_harness_source(bad_sig)[0]
+
+
+def test_gate_modes_reject_regression_and_metamorphic_hacks():
+    parent = ArchiveEntry(
+        gen=0,
+        parent_gen=None,
+        harness_path="gen_000/harness.py",
+        rationale="seed",
+        dev_low_rate=0.5,
+        in_loop_rate=0.5,
+        dev_error_rate=0.2,
+        avg_llm_calls=1.0,
+        solved_ids=["t1"],
+    )
+    # Candidate improves dev_low average (0.5 -> 0.75) by solving t2, t3 via lucky hack, while regressing t1!
+    cand_eval = {
+        "summary": {
+            "n_tasks": 4,
+            "dev_low_rate": 0.75,
+            "meta_pass_rate": 0.25,
+            "in_loop_rate": 0.75,
+            "dev_error_rate": 0.25,
+            "avg_llm_calls": 1.0,
+            "solved_ids_dev_low": ["t2", "t3", "t4"],
+            "solved_ids_in_loop": ["t2", "t3", "t4"],
+        },
+        "records": [
+            {"task_id": "t1", "dev_low_ok": False, "meta_checked": False, "meta_consistent": False},
+            {"task_id": "t2", "dev_low_ok": True, "meta_checked": True, "meta_consistent": False},
+            {"task_id": "t3", "dev_low_ok": True, "meta_checked": True, "meta_consistent": False},
+            {"task_id": "t4", "dev_low_ok": True, "meta_checked": True, "meta_consistent": True},
+        ],
+    }
+    # Naive accepts because scalar average went up (0.5 -> 0.75).
+    assert evaluate_gate("naive", parent, cand_eval).accepted
+    # Preserve-and-extend rejects because t1 regressed (when stepping-stone disabled)!
+    dec_p = evaluate_gate("preserve", parent, cand_eval, max_regress=0, allow_stepping_stone=False)
+    assert not dec_p.accepted
+    assert dec_p.regressed == ["t1"]
+    # With stepping-stone enabled, +3 solved / -1 regressed enters archive as an alternative lineage.
+    dec_ss = evaluate_gate("preserve", parent, cand_eval, max_regress=0, allow_stepping_stone=True)
+    assert dec_ss.accepted
+    assert "stepping-stone" in dec_ss.reason
+
+    # Now suppose t1 stays solved, and t2 passes dev_low ONLY by lucky hack (meta_consistent=False).
+    cand_lucky = {
+        "summary": {
+            "n_tasks": 2,
+            "dev_low_rate": 1.0,
+            "meta_pass_rate": 0.5,
+            "in_loop_rate": 0.5,  # metamorphic mode only counts dev_low AND meta_consistent
+            "dev_error_rate": 0.0,
+            "avg_llm_calls": 1.0,
+            "solved_ids_dev_low": ["t1", "t2"],
+            "solved_ids_in_loop": ["t1"],
+        },
+        "records": [
+            {"task_id": "t1", "dev_low_ok": True, "meta_checked": True, "meta_consistent": True},
+            {"task_id": "t2", "dev_low_ok": True, "meta_checked": True, "meta_consistent": False},
+        ],
+    }
+    dec_m = evaluate_gate("metamorphic", parent, cand_lucky, max_regress=0)
+    assert not dec_m.accepted
+    assert dec_m.meta_blocked == ["t2"]
+
+
+def test_end_to_end_mock_evolution():
+    """Verify full 1-generation evolution loop produces archive, diff, history, and oracle metrics."""
+    # Task mock: emits EPSG:3857 when prompt has no hint, emits estimate_utm_crs when harness adds `USE_UTM`.
+    def mock_task_llm(system: str, user: str) -> str:
+        use_utm = "USE_UTM" in (system + user)
+        crs_line = "g = g.to_crs(g.estimate_utm_crs())" if use_utm else "g = g.to_crs('EPSG:3857')"
+        return (
+            "```python\n"
+            "import glob, geopandas as gpd\n"
+            "f = sorted(glob.glob('*.geojson') + glob.glob('*.gpkg'))[0]\n"
+            "g = gpd.read_file(f)\n"
+            f"{crs_line}\n"
+            "print(g.geometry.area.sum())\n"
+            "```"
+        )
+
+    mutated_harness = '''
+from pathlib import Path
+import re
+def solve(task_prompt, work_dir, llm_call, run_python):
+    reply = llm_call("USE_UTM", task_prompt)
+    blocks = re.findall(r"```(?:python)?\\s*\\n(.*?)```", reply, re.S)
+    return {"code": blocks[-1].strip() if blocks else None, "trace": [], "turns": 1}
+'''
+
+    def mock_meta_llm(system: str, user: str) -> str:
+        return f"HYPOTHESIS: Switch to local UTM projection.\n```python\n{mutated_harness}\n```"
+
+    task_llm = LLMClient("mock", "mock-task", mock_fn=mock_task_llm)
+    meta_llm = LLMClient("mock", "mock-meta", mock_fn=mock_meta_llm)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        exp_dir = Path(tmp) / "exp_test"
+        arch = run_evolution(
+            exp_dir=exp_dir,
+            data_root=DATA_ROOT,
+            gate_mode="metamorphic",
+            generations=1,
+            task_llm=task_llm,
+            meta_llm=meta_llm,
+            dev_per_family=1,
+            test_seen_per_family=0,
+            test_heldout_per_family=0,
+            limit_dev=2,
+            workers=1,
+        )
+        assert (exp_dir / "archive.json").exists()
+        assert (exp_dir / "history.jsonl").exists()
+        assert (exp_dir / "gen_001" / "diff.patch").exists()
+        assert len(arch.entries) >= 1
+
+
+def test_seed_harness_and_subpackages_layout():
+    """Verify packaged seed harness passes AST check and Colab bundler includes both packages."""
+    repo_root = Path(__file__).resolve().parents[1]
+    seed_path = repo_root / "meta_rsi" / "harnesses" / "seed.py"
+    ok, reason = validate_harness_source(seed_path.read_text())
+    assert ok, reason
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tgz = Path(tmp) / "bundle.tgz"
+        n = pack_bundle(repo_root, DATA_ROOT, tgz, dev_per_family=1, test_seen_per_family=0, test_heldout_per_family=0)
+        assert n == 18
+        with tarfile.open(tgz, "r:gz") as tf:
+            names = set(tf.getnames())
+        assert "meta_rsi/evolve.py" in names
+        assert "meta_rsi/harnesses/seed.py" in names
+        assert "benchmarks/gsb/harness.py" in names
+
+
+def test_polar_ood_preserves_truth_and_breaks_utm():
+    """Polar OOD relocations (>84N / <80S) keep AEQD ground truth invariant while breaking estimate_utm_crs()."""
+    tasks = [json.loads(line) for line in open(DATA_ROOT / "tasks.jsonl")]
+    seen = {}
+    for t in tasks:
+        if not BY_NAME[t["family"]].large and t["family"] not in seen:
+            seen[t["family"]] = t
+    assert len(seen) == 19
+
+    utm_exceptions = 0
+    for fam_name, task in sorted(seen.items()):
+        fam = BY_NAME[fam_name]
+        low_info = task["variants"]["low"]
+        low_dir = DATA_ROOT / low_info["dir"]
+        for lat, lon, flip in [(86.5, 25.0, False), (-85.5, -40.0, True)]:
+            with tempfile.TemporaryDirectory() as tmp:
+                pert_dir = Path(tmp) / "polar"
+                perturb_workspace(low_dir, pert_dir, target_lat=lat, target_lon=lon, shuffle_rows=True, flip_gpkg_crs=flip, seed=11)
+                layers = read_layers(pert_dir, task["files"])
+                val = fam.solve(layers, reference_proj(layers), task["params"])
+                assert matches(val, low_info["truth"], task["answer"]), (
+                    f"Polar invariance broken on {fam_name} @ ({lat},{lon}): orig={low_info['truth']}, pert={val}"
+                )
+                try:
+                    next(iter(layers.values())).to_crs("EPSG:4326").estimate_utm_crs()
+                except RuntimeError:
+                    utm_exceptions += 1
+    assert utm_exceptions == 19 * 2
+
+
+def test_metamorphic_diag_is_domain_neutral_by_default():
+    """Default metamorphic diagnostics must not leak GIS/CRS hints unless explicitly opted in."""
+    tasks = [json.loads(line) for line in open(DATA_ROOT / "tasks.jsonl")]
+    t = next(
+        x
+        for x in tasks
+        if x["family"] == "area_by_class"
+        and x["split"] == "train"
+        and abs(x["variants"]["low"]["lat"]) < 2.5
+    )
+    low_dir = DATA_ROOT / t["variants"]["low"]["dir"]
+    wm_script = (
+        "import glob, geopandas as gpd\n"
+        "f = sorted(glob.glob('*.geojson') + glob.glob('*.gpkg'))[0]\n"
+        "g = gpd.read_file(f).to_crs('EPSG:3857')\n"
+        "print(g.geometry.area.sum())\n"
+    )
+    orig = float(run_python_sandbox(wm_script, low_dir)["stdout"].strip().splitlines()[-1])
+
+    ok_neutral, diag_neutral, _ = _run_metamorphic_check(
+        wm_script, low_dir, orig, t["answer"], include_domain_hint=False
+    )
+    assert not ok_neutral
+    assert "EPSG:3857" not in diag_neutral
+    assert "UTM" not in diag_neutral
+
+    ok_hint, diag_hint, _ = _run_metamorphic_check(
+        wm_script, low_dir, orig, t["answer"], include_domain_hint=True
+    )
+    assert not ok_hint
+    assert "EPSG:3857" in diag_hint
+
+
+def test_oracle_gate_and_caught_exception_tracking():
+    """Oracle gate accepts new oracle-solved tasks; sandbox tracks swallowed exceptions when enabled."""
+    parent = ArchiveEntry(
+        gen=0,
+        parent_gen=None,
+        harness_path="gen_000/harness.py",
+        rationale="seed",
+        dev_low_rate=0.5,
+        in_loop_rate=0.25,
+        dev_error_rate=0.0,
+        avg_llm_calls=1.0,
+        solved_ids=["t1"],
+    )
+    cand_eval = {
+        "summary": {
+            "n_tasks": 4,
+            "dev_low_rate": 0.5,
+            "meta_pass_rate": None,
+            "in_loop_rate": 0.5,
+            "dev_error_rate": 0.0,
+            "avg_llm_calls": 1.0,
+            "solved_ids_dev_low": ["t1", "t2"],
+            "solved_ids_in_loop": ["t1", "t2"],
+        },
+        "records": [
+            {"task_id": "t1", "dev_low_ok": True, "meta_checked": False, "meta_consistent": False},
+            {"task_id": "t2", "dev_low_ok": True, "meta_checked": False, "meta_consistent": False},
+        ],
+    }
+    dec = evaluate_gate("oracle", parent, cand_eval, max_regress=0)
+    assert dec.accepted
+    assert "oracle-preserve-and-extend" in dec.reason
+
+    with tempfile.TemporaryDirectory() as tmp:
+        w = Path(tmp) / "w"
+        w.mkdir()
+        swallow_code = "try:\n    x = 1 / 0\nexcept ZeroDivisionError:\n    x = 0\nprint(x)\n"
+        r = run_python_sandbox(swallow_code, w, track_caught=True)
+        assert r["returncode"] == 0
+        assert any("ZeroDivisionError" in e for e in r["caught_exceptions"])

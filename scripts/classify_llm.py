@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gsb.harness import extract_code  # noqa: E402
+from benchmarks.gsb.harness import extract_code  # noqa: E402
 
 URL = "https://generativelanguage.googleapis.com/v1beta/decisions"
 OPTIONS = {

@@ -4,10 +4,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gsb.audit import audit_task
-from gsb.build import make_task
-from gsb.families import FAMILIES
-from gsb.harness import score
+from benchmarks.gsb.audit import audit_task
+from benchmarks.gsb.build import make_task
+from benchmarks.gsb.families import FAMILIES
+from benchmarks.gsb.harness import score
 
 METRIC_REAL = {"buffer_union_area", "mean_nn_distance", "nearest_facility_max", "area_by_class",
                "perimeter_by_class", "overlay_area", "centroid_distance", "road_length_by_type",
@@ -72,9 +72,9 @@ def test_harness_end_to_end(tasks):
 
 
 def test_equal_area_passes_large_area(tasks):
-    from gsb.build import read_layers
-    from gsb.families import BY_NAME
-    from gsb.harness import matches
+    from benchmarks.gsb.build import read_layers
+    from benchmarks.gsb.families import BY_NAME
+    from benchmarks.gsb.harness import matches
     root, ts = tasks
     fam = BY_NAME["large_region_area"]
     for t in (t for t in ts if t["family"] == "large_region_area"):

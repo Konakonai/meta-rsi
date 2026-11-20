@@ -30,7 +30,7 @@ runpy.run_path("solution.py", run_name="__main__")
 
 bench = Path(sys.argv[1]); run = sys.argv[2]; out = sys.argv[3]
 sys.path.insert(0, str(bench))
-from gsb.harness import extract_code
+from benchmarks.gsb.harness import extract_code
 root = bench / "data/v1"
 tasks = {t["task_id"]: t for t in map(json.loads, open(root / "tasks.jsonl"))}
 rows = [r for r in map(json.loads, open(bench / f"results/zero_shot_v1/{run}.jsonl"))

@@ -6,7 +6,7 @@ For each task, re-solve with a known method and score it against the stored trut
   utm30n       hard-coded EPSG:32630
   low_only     what single-location scoring would say about webmercator (low variant only)
 
-    python -m gsb.audit data/v1
+    python -m benchmarks.gsb.audit data/v1
 """
 from __future__ import annotations
 

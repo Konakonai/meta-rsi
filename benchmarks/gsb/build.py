@@ -1,6 +1,6 @@
 """Generate task instances: files for three location variants, prompt, and ground truth.
 
-    python -m gsb.build --out data/v1 --train 150 --test 20 --heldout 40 --seed 0
+    python -m benchmarks.gsb.build --out data/v1 --train 150 --test 20 --heldout 40 --seed 0
 """
 from __future__ import annotations
 

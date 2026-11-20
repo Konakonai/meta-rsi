@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gsb.harness import extract_code, score  # noqa: E402
+from benchmarks.gsb.harness import extract_code, score  # noqa: E402
 
 HINT = "\nDistances, lengths and areas must be accurate to within 1%, wherever the data is on the Earth."
 RULES = """

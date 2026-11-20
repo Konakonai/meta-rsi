@@ -1,69 +1,157 @@
-# gis-silent-bench
+# meta-rsi
 
-Synthetic GIS analysis tasks for studying silent errors: code that runs but returns a wrong number.
-Each task is written three times with the same local geometry at three places on the globe, and a script must be right on all three to count as correct.
-This catches methods that are right only by location, for example measuring in EPSG:3857 near the equator or hard-coding one UTM zone.
+**Metamorphic-Gated Recursive Self-Improvement (RSI) for LLM Agents**, evaluated primarily on geospatial analysis tasks where weak verifiers admit *silent errors* (code that executes cleanly and passes local checks, yet fails catastrophically out-of-distribution).
 
-## Layout
+## Core Idea
 
-- `gsb/geo.py`: location variants and placement of local-metre geometry on WGS84.
-- `gsb/families.py`: task families (geometry generator, question, reference solution).
-- `gsb/build.py`: writes data files, prompts and ground truth (`tasks.jsonl`).
-- `gsb/harness.py`: extracts code from a model answer, runs it on the three variants, classifies the result.
-- `gsb/audit.py`: re-solves every task with known right and wrong methods to show what the scoring can catch.
-- `scripts/zero_shot.py`: samples answers with vLLM and scores them.
-- `scripts/classify_errors.py`: labels silent_wrong / lucky answers by matching them against re-solved wrong methods (EPSG:3857, degrees, fixed UTM zone, one zone over a large extent, unit factor, and for point-distance tasks latitude/longitude swapped and nearest neighbour searched on degrees).
-- `scripts/classify_llm.py`: labels the same answers with the Gemini Decisions API (`GEMINI_API_KEY`), for agreement with the rules and for answers the rules cannot place.
+When self-evolving an Agent Harness against a weak in-loop verifier (such as single-location checks), standard archive policies like scalar hill-climbing (`naive`) or DarwinX-style `Preserve-and-Extend` (`preserve`) suffer from **Proxy Lock-In**: early mutations exploit location-specific shortcuts (e.g., measuring in Web Mercator `EPSG:3857` near the equator), and strict preservation gates then reject genuinely general fixes that drop even a single lucky task.
 
-## Variants
+`meta-rsi` breaks Proxy Lock-In using **Label-Free Metamorphic Invariance Gating**:
+- Given only a task's input workspace $x$ (zero extra labels or hidden test variants), an invariance operator $T(x)$ constructs an equivalent perturbed workspace (local AEQD spatial relocation, ellipsoidal isometry for large extents, `.gpkg` CRS storage flip, and row shuffling).
+- A task counts as verified in-loop only if the emitted script passes the weak check **and** stays self-consistent between $x$ and $T(x)$.
+- A **domain-neutral Meta-Agent** evolves a self-contained Python Agent Harness (`harness.py`) using only in-loop failures, domain-neutral metamorphic drift diagnostics (with optional `--meta-domain-hints` ablation), and a DGM/DarwinX lineage archive with recombination.
+
+## Documentation
+
+Long-term project documentation lives under `docs/`:
+- [docs/RESEARCH.md](docs/RESEARCH.md) — Master research plan, verified experiment log, category breakdowns, open methodological risks, and phased roadmap.
+- [docs/LITERATURE.md](docs/LITERATURE.md) — Living literature survey & positioning matrix (RSI/Harness evolution, GeoAI executable benchmarks, silent errors, spurious correctness).
+- [docs/GSB_V1_BASELINE.md](docs/GSB_V1_BASELINE.md) — `benchmarks/gsb` v1 audit, 5-condition zero-shot results (`480 × 8`), rule + `gemini-decision-1` error taxonomy, and skill-contamination evidence.
+- [docs/INFRA_AND_GOTCHAS.md](docs/INFRA_AND_GOTCHAS.md) — Compute inventory, budgets, Colab G4 vLLM & GRPO/LoRA benchmarks, and engineering runbook.
+
+## Verified Results (v0.2, 4 Paired Disjoint Seeds)
+
+- **Task LLM**: frozen `google/gemma-4-E4B-it` (`enable_thinking=False`, `temp=0.0`, max 4 calls/task)
+- **Meta LLM**: `gemini-4-hydrogen` (`thinking_level=low`, domain-neutral system prompt)
+- **Protocol**: 4 disjoint dev splits (36 tasks/seed = 2 per 18 seen families), 4 generations, evaluated on 150 unseen 3-location test tasks (90 seen + 60 held-out = 450 executions/harness).
+
+| Method | Seeds | Dev `Low` (Weak) | Dev `Oracle` (3-loc) | Dev Gap | **Test ALL (`n=150`)** | **Test Seen (`n=90`)** | **Test Held-out (`n=60`)** | **Test `Lucky`** | Test `Err` | Calls | Lock-In (Gap ≥15%) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Gen-0 Seed (`harnesses/seed.py`) | 1 | 45.8% | 17.6% | +28.2% | 28.0% | 24.4% | 33.3% | 31.3% | 17.3% | 1.00 | — |
+| `naive` (hill-climbing) | 4 | 84.7 ± 2.8% | 66.7 ± 24.3% | 18.1 ± 23.6% | 70.0 ± 23.6% | 67.5 ± 17.7% | 73.8 ± 32.6% | 20.3 ± 21.7% | 2.7 ± 1.2% | 1.26 | 1/4 |
+| `preserve` (DarwinX-style) | 4 | 75.7 ± 11.9% | 50.7 ± 21.9% | 25.0 ± 12.6% | 54.5 ± 20.9% | 52.5 ± 17.4% | 57.5 ± 26.6% | 23.8 ± 12.7% | 5.2 ± 1.9% | 1.27 | **3/4** |
+| **`metamorphic` (Ours)** | 4 | 80.6 ± 2.3% | **77.8 ± 3.9%** | **2.8 ± 5.6%** | **81.8 ± 3.3%** | **75.8 ± 3.1%** | **90.8 ± 7.4%** | **2.3 ± 2.5%** | 7.5 ± 2.6% | 1.47 | **0/4** |
+
+- Best evolved 4B no-think harness (`1.27` calls/task) reaches **86.7% ALL / 98.3% Held-out / 0.7% lucky**, outperforming zero-shot thinking `gemma-4-26B-A4B-it` (`71.7%`) and `Qwen3.8-27B` (`62.2%`).
+
+## Repository Layout
+
+```text
+meta-rsi/
+├── meta_rsi/                   # Core RSI framework
+│   ├── llm.py                  # Multi-backend LLM wrapper (openai-compat, gemini-cli, gemini-rest, mock)
+│   ├── sandbox.py              # AST validator, dynamic harness loader, clean-copy sandbox & call cap
+│   ├── metamorphic.py          # Label-free invariance operators T(x) (AEQD shift, isometry, CRS flip, tabular)
+│   ├── evaluator.py            # Dual-view evaluator (in-loop weak verifier vs hidden 3-location oracle)
+│   ├── archive.py              # Lineage archive, parent/recombination selection, gating policies
+│   ├── meta_agent.py           # Domain-neutral Meta-Agent proposer
+│   ├── evolve.py               # Main RSI evolution loop CLI
+│   ├── harnesses/
+│   │   └── seed.py             # Gen-0 seed Agent Harness (`solve(task_prompt, work_dir, llm_call, run_python)`)
+│   ├── eval/                   # Evaluation & statistical reporting CLIs
+│   │   ├── eval_test.py        # Unseen test-set evaluator (full 480 or stratified)
+│   │   ├── eval_ood.py         # Polar OOD (>84N / <80S, UTM-undefined) stress-test evaluator
+│   │   ├── report.py           # Side-by-side single-run summary
+│   │   ├── stats.py            # Multi-seed aggregation & lock-in stats
+│   │   └── analysis.py         # Paired t-tests, category breakdowns & publication tables
+│   └── infra/                  # Cloud GPU / Colab G4 utilities
+│       ├── colab_g4.py         # One-command Colab G4 bundle & launcher
+│       └── start_g4_vllm.py    # Remote G4 vLLM server bootstrap
+├── benchmarks/
+│   └── gsb/                    # Geospatial Silent-Error Benchmark (21 families, 3-location oracle)
+│       ├── geo.py              # Location variants & local-metre AEQD placement on WGS84
+│       ├── families.py         # 21 GIS task families (18 seen + 3 held-out) & reference solvers
+│       ├── build.py            # Dataset generator (`tasks.jsonl` + variant workspaces)
+│       ├── harness.py          # Code extraction, 3-variant execution & scoring
+│       └── audit.py            # Method separability audit (reference, UTM, EPSG:3857, fixed UTM)
+├── scripts/                    # Zero-shot baseline, error-classification & plotting utilities
+│   ├── zero_shot.py            # vLLM zero-shot baseline sampling & scoring
+│   ├── classify_errors.py      # Rule-based silent-error fingerprinting
+│   ├── classify_llm.py         # Gemini Decisions API error classification
+│   ├── caught_exceptions.py    # Detect scripts that swallowed runtime exceptions
+│   ├── check_aeqd_truth.py     # Verify AEQD vs ellipsoidal geodesic ground-truth agreement
+│   └── plot_figures.py         # Generate SVG figures into docs/figures/
+├── tests/                      # Unit & end-to-end tests (`test_gsb.py`, `test_meta_rsi.py`)
+├── docs/                       # Living research docs, baseline audit & SVG figures
+│   ├── RESEARCH.md             # Master research plan, experiment log & roadmap
+│   ├── LITERATURE.md           # Unified literature survey & positioning matrix
+│   ├── GSB_V1_BASELINE.md      # Complete GSB v1 zero-shot & silent-error report
+│   ├── INFRA_AND_GOTCHAS.md    # Compute inventory, budgets & Colab G4 runbook
+│   ├── gsb_v1_audit.log        # Method-separability audit log across all 21 families
+│   └── figures/                # Generated SVG plots (`fig_outcomes`, `fig_mercator`, `fig_rsi_gates`)
+├── pyproject.toml              # Package metadata & pytest configuration
+└── shell.nix                   # Reproducible NixOS geospatial Python environment
+```
+
+## Quick Start
+
+Enter the reproducible geospatial Python environment (or install dependencies from `pyproject.toml`):
+
+```bash
+nix-shell
+```
+
+### 1. Build & Audit the Geospatial Silent-Error Benchmark (`benchmarks/gsb`)
+
+```bash
+python -m benchmarks.gsb.build --out data/v1 --train 150 --test 20 --heldout 40 --seed 0
+python -m benchmarks.gsb.audit data/v1
+```
+
+### 2. Run RSI Harness Evolution
+
+```bash
+python -m meta_rsi.evolve \
+    --exp my_meta_run \
+    --gate metamorphic \
+    --generations 4 \
+    --dev-per-family 2 --dev-offset 0 \
+    --task-backend openai-compat --task-url http://127.0.0.1:18000/v1 \
+    --task-model google/gemma-4-E4B-it --task-temp 0.0 --task-no-think \
+    --meta-backend gemini-cli --meta-model gemini-4-hydrogen \
+    --meta-thinking-level low --meta-max-tokens 16384
+```
+
+### 3. Evaluate on Unseen Test Split, Polar OOD & Generate Reports / Figures
+
+```bash
+python -m meta_rsi.eval.eval_test \
+    --harness runs/my_meta_run/gen_004/harness.py \
+    --out runs/eval150/my_meta_run.json \
+    --task-no-think --seen-per-family 5 --heldout-per-family 20
+
+# Polar OOD stress test (>84N / <80S, disjoint from metamorphic targets, breaks estimate_utm_crs)
+python -m meta_rsi.eval.eval_ood \
+    --harness runs/my_meta_run/gen_004/harness.py \
+    --out runs/eval_ood/my_meta_run.json \
+    --task-no-think --track-caught
+
+python -m meta_rsi.eval.stats runs/v3_gis_s*
+python -m meta_rsi.eval.analysis runs/eval150
+
+# Regenerate SVG figures into docs/figures/
+nix-shell -p "python3.withPackages(ps:[ps.matplotlib ps.numpy])" --run "python scripts/plot_figures.py"
+```
+
+### 4. Run Tests
+
+```bash
+python -m pytest -q tests
+```
+
+## Geospatial Silent-Error Benchmark (`benchmarks/gsb`)
+
+Each task places identical local geometry at three locations on the globe; a script must answer accurately on all three variants to count as `correct`.
 
 | Variant | Center | Why |
 |---|---|---|
-| `low` | latitude within ±7° | EPSG:3857 distortion under 1%, so 3857 passes here by luck |
-| `high` | latitude ±52–64° | EPSG:3857 inflates lengths 1.6–2.3× |
-| `zone_edge` | latitude ±25–45°, on a UTM zone boundary | data straddles two zones; far from any fixed zone |
+| `low` | latitude within ±7° | `EPSG:3857` distortion < 1%, so Web Mercator passes here by luck |
+| `high` | latitude ±52–64° | `EPSG:3857` inflates lengths 1.6–2.3× (areas 2.5–5×) |
+| `zone_edge` | latitude ±25–45°, on a UTM zone boundary | data straddles two zones; breaks any hard-coded UTM zone |
 
-Large-extent families use `low` (±5°), `mid` (±28–40°) and `zone_edge` (±28–40°, on a zone boundary), shift degree-based geometry instead of projecting it, and take ground truth from `pyproj.Geod` (ellipsoidal area and distance).
-
-Local families build geometry in metres on a plane and place it on the WGS84 ellipsoid with an inverse azimuthal equidistant (AEQD) projection centred on the variant's center.
-Ground truth is the planar measure after re-projecting the data to an AEQD projection centred on its bounding box; distance thresholds are applied in the same projection.
-Over these extents (under about 30 km) this agrees with ellipsoidal geodesic measures on WGS84 to within 0.0001% for area, length and point distance (`scripts/check_aeqd_truth.py`, 1,000 shapes at latitudes 0–64°), far below the 1% tolerance.
-The prompt never states the location or CRS. GeoPackage layers are stored in a local UTM CRS in 25% of tasks, and point layers can be CSV with `lon`/`lat` columns.
-
-## Families
-
-Seen (train and test):
-
-- Projection-sensitive, local extent: `buffer_union_area`, `count_within`, `mean_nn_distance`, `sum_within`, `nearest_facility_max`, `area_by_class`, `perimeter_by_class`, `overlay_area`, `centroid_distance`, `road_length_by_type`, `count_near_roads`, `roads_in_district`.
-- Method traps that do not depend on the projection: `points_in_polygon`, `area_weighted_population` (overlay without scaling by the clipped share), `covered_population` (overlapping buffers count a community twice), `mean_per_district` (an inner join drops empty districts). `roads_in_district` also separates `within`, `intersects` and clipping.
-- Large extent (tens of degrees; one UTM zone is no longer accurate, geodesic or equal-area methods needed): `large_region_area`, `large_route_length`.
-
-Held out (test only): `density_in_polygon`, `road_buffer_area`, `max_pair_distance`.
-
-Answers are in metres, kilometres, square metres, square kilometres or hectares, chosen per task.
-
-## Scoring
-
-Real-valued answers must be within 1% of the truth, counts must match exactly.
-
-| Category | Meaning |
-|---|---|
-| `correct` | right on all three variants |
-| `error` | exception, timeout, or last output line is not a number on some variant |
-| `silent_wrong` | runs everywhere, wrong everywhere |
-| `lucky` | runs everywhere, right on some variants only |
-| `no_code` | no Python code block in the answer |
-
-## Usage
-
-    nix-shell
-    python -m gsb.build --out data/v1 --train 150 --test 20 --heldout 40 --seed 0
-    python -m gsb.audit data/v1
-    python -m pytest -q tests
-
-## Known limits
-
-- Synthetic data and English prompts; each answer is a single number.
-- `points_in_polygon` does not depend on the projection, so it tests filtering and spatial predicates rather than CRS handling.
-- Count tasks only catch a distorted projection when some features lie between the distorted and the true threshold distance.
-- Buffer-area tasks only separate methods when buffers overlap (without overlap the 3857 answer equals the true one), so `buffer_union_area` keeps union/sum area between 0.3 and 0.8.
+- **Ground truth**: Local tasks (extent < 30 km) use an AEQD projection centred on the bounding box (verified within 0.0001% of `pyproj.Geod` via `python -m scripts.check_aeqd_truth`). Large-extent tasks use `pyproj.Geod` on WGS84 directly. Prompts never state location or CRS; 25% of `.gpkg` layers are stored in a local UTM CRS, and point layers can be CSV with `lon`/`lat`.
+- **Families (21 total)**:
+  - *Seen (18)*: `buffer_union_area`, `count_within`, `mean_nn_distance`, `sum_within`, `nearest_facility_max`, `area_by_class`, `perimeter_by_class`, `overlay_area`, `centroid_distance`, `road_length_by_type`, `count_near_roads`, `roads_in_district`, `points_in_polygon`, `area_weighted_population`, `covered_population`, `mean_per_district`, `large_region_area`, `large_route_length`.
+  - *Held-out (3)*: `density_in_polygon`, `road_buffer_area`, `max_pair_distance`.
+- **Scoring**: Real answers within 1% of truth, counts exact. Categories: `correct` (all 3 right), `lucky` (runs everywhere, right on some variants only), `silent_wrong` (runs everywhere, wrong everywhere), `error` (exception, timeout, or non-numeric output), `no_code`.
+- **Audit**: See [docs/gsb_v1_audit.log](docs/gsb_v1_audit.log) for method-separability verification across all 21 families.

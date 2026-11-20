@@ -35,10 +35,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gsb.audit import NonFinite, guarded  # noqa: E402
-from gsb.build import read_layers  # noqa: E402
-from gsb.families import BY_NAME, conv  # noqa: E402
-from gsb.harness import extract_code, matches  # noqa: E402
+from benchmarks.gsb.audit import NonFinite, guarded  # noqa: E402
+from benchmarks.gsb.build import read_layers  # noqa: E402
+from benchmarks.gsb.families import BY_NAME, conv  # noqa: E402
+from benchmarks.gsb.harness import extract_code, matches  # noqa: E402
 
 EPSG_UTM = re.compile(r"(?:EPSG:|epsg:|epsg=|EPSG=|crs=|to_crs\()?\b(32[67](?:0[1-9]|[1-5]\d|60))\b")
 FEATURES = {

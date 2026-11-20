@@ -8,7 +8,7 @@ Run: nix-shell --run "python -m scripts.check_aeqd_truth"
 """
 import numpy as np, shapely, geopandas as gpd
 from pyproj import Geod
-from gsb.geo import place, local_crs
+from benchmarks.gsb.geo import place, local_crs
 G=Geod(ellps="WGS84"); rng=np.random.default_rng(0)
 worst={"area":0,"length":0,"dist":0}
 for lat in [0,30,45,60,64]:
