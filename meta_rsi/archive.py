@@ -42,6 +42,7 @@ def evaluate_gate(
     *,
     max_regress: int = 0,
     allow_stepping_stone: bool = True,
+    soft_regress_delta: float = 0.06,
 ) -> GateDecision:
     """Decide whether candidate harness enters the archive using STRICTLY in-loop signals."""
     s = candidate_eval["summary"]
@@ -69,6 +70,55 @@ def evaluate_gate(
             reason=f"naive: dev_low_rate did not improve ({parent.dev_low_rate:.3f} -> {s['dev_low_rate']:.3f})",
             newly_solved=newly_solved,
             regressed=regressed,
+        )
+
+    if gate_mode in ("darwinx_soft", "meta_soft", "meta_gate_only"):
+        # True DarwinX-style soft bounded regression (arXiv:2608.07545 §2.1):
+        # Accept iff net gain g(c) = |newly_solved| - |regressed| > 0 AND regression fraction R(c) <= delta.
+        # `meta_soft` / `meta_gate_only` apply the EXACT SAME rule on metamorphic-filtered `solved_ids_in_loop`,
+        # isolating the verifier signal with zero gating-formula confounder.
+        n_tasks = max(int(s.get("n_tasks") or 1), 1)
+        net_gain = len(newly_solved) - len(regressed)
+        reg_frac = len(regressed) / n_tasks
+        tag = {
+            "darwinx_soft": "darwinx-soft",
+            "meta_soft": "meta-soft",
+            "meta_gate_only": "meta-gate-only",
+        }[gate_mode]
+        if net_gain > 0 and reg_frac <= soft_regress_delta + 1e-9:
+            return GateDecision(
+                accepted=True,
+                reason=f"{tag}: accepted (+{len(newly_solved)} / -{len(regressed)}, net=+{net_gain}, "
+                       f"R={reg_frac:.3f}<=delta={soft_regress_delta:.3f}, in_loop {parent.in_loop_rate:.3f} -> {s['in_loop_rate']:.3f}, "
+                       f"meta_blocked={len(meta_blocked)})",
+                newly_solved=newly_solved,
+                regressed=regressed,
+                meta_blocked=meta_blocked,
+            )
+        if reg_frac > soft_regress_delta + 1e-9:
+            return GateDecision(
+                accepted=False,
+                reason=f"{tag}: rejected (R={reg_frac:.3f} > delta={soft_regress_delta:.3f}; "
+                       f"+{len(newly_solved)} / -{len(regressed)}, meta_blocked={len(meta_blocked)})",
+                newly_solved=newly_solved,
+                regressed=regressed,
+                meta_blocked=meta_blocked,
+            )
+        if net_gain == 0 and len(regressed) == 0 and s["dev_error_rate"] + 0.05 < parent.dev_error_rate:
+            return GateDecision(
+                accepted=True,
+                reason=f"{tag}: accepted via stability gain (error {parent.dev_error_rate:.3f} -> {s['dev_error_rate']:.3f})",
+                newly_solved=newly_solved,
+                regressed=regressed,
+                meta_blocked=meta_blocked,
+            )
+        return GateDecision(
+            accepted=False,
+            reason=f"{tag}: rejected (net={net_gain:+d}, +{len(newly_solved)} / -{len(regressed)}, "
+                   f"in_loop={s['in_loop_rate']:.3f}, meta_blocked={len(meta_blocked)})",
+            newly_solved=newly_solved,
+            regressed=regressed,
+            meta_blocked=meta_blocked,
         )
 
     if gate_mode in ("preserve", "metamorphic", "oracle"):
@@ -145,9 +195,10 @@ def evaluate_gate(
 
 
 class LineageArchive:
-    def __init__(self, run_dir: Path, gate_mode: str):
+    def __init__(self, run_dir: Path, gate_mode: str, *, parent_policy: str = "auto"):
         self.run_dir = run_dir
         self.gate_mode = gate_mode
+        self.parent_policy = parent_policy
         self.entries: list[ArchiveEntry] = []
         self.attempts: list[dict] = []
 
@@ -166,22 +217,37 @@ class LineageArchive:
         return max(self.entries, key=lambda e: (e.in_loop_rate, -e.dev_error_rate, e.gen))
 
     def select_parent(self, rng: random.Random) -> tuple[ArchiveEntry, ArchiveEntry | None]:
-        """DGM/DarwinX parent selection: balance in-loop score and novelty (fewer children).
+        """Parent selection with explicit policy toggle (`auto`, `best`, `dgm`) for clean ablations.
 
-        Also returns an optional complementary partner from the archive for recombination
-        when another lineage solves tasks the selected parent misses.
+        - `best`: always mutate the highest-scoring archive entry (with optional complementary partner).
+        - `dgm`: DGM/DarwinX score × novelty selection over non-dominated/non-seed lineages.
+        - `auto`: legacy behavior (`best` for `naive`, `dgm` for other modes).
         """
         if len(self.entries) == 1:
             return self.entries[0], None
-        if self.gate_mode == "naive":
-            return self.best(), None
+        eff = ("best" if self.gate_mode == "naive" else "dgm") if self.parent_policy == "auto" else self.parent_policy
+        if eff == "best":
+            parent = self.best()
+            if self.gate_mode == "naive" and self.parent_policy == "auto":
+                return parent, None
+            p_set = set(parent.solved_ids)
+            partner, best_gain = None, 0
+            for cand in self.entries:
+                if cand.gen == parent.gen:
+                    continue
+                gain = len(set(cand.solved_ids) - p_set)
+                if gain > best_gain:
+                    best_gain = gain
+                    partner = cand
+            return parent, partner
 
+        pool = [e for e in self.entries if e.gen > 0] if len(self.entries) > 1 else self.entries
         weights = []
-        for e in self.entries:
+        for e in pool:
             score_w = 0.25 + e.in_loop_rate
             novelty_w = 1.0 / (1.0 + e.children)
             weights.append(score_w * novelty_w)
-        parent = rng.choices(self.entries, weights=weights, k=1)[0]
+        parent = rng.choices(pool, weights=weights, k=1)[0]
 
         # Check if any other archive entry solves tasks that `parent` does NOT solve.
         p_set = set(parent.solved_ids)

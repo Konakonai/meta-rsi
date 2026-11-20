@@ -146,7 +146,7 @@ Each task places identical local geometry at three locations on the globe; a scr
 
 | Variant | Center | Why |
 |---|---|---|
-| `low` | latitude within ±7° | `EPSG:3857` distortion < 1%, so Web Mercator passes here by luck |
+| `low` | latitude within ±7° | `EPSG:3857` distortion < 0.75% in length (< 1.51% in area, < 1% within ±5.7°), so Web Mercator passes most `low` tasks by luck |
 | `high` | latitude ±52–64° | `EPSG:3857` inflates lengths 1.6–2.3× (areas 2.5–5×) |
 | `zone_edge` | latitude ±25–45°, on a UTM zone boundary | data straddles two zones; breaks any hard-coded UTM zone |
 

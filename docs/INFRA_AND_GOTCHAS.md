@@ -1,7 +1,7 @@
 # Compute Inventory, Budgets & Engineering Runbook
 
 > Long-term infrastructure reference for local NixOS development, Colab G4 inference/training, API usage, and hard-won gotchas.
-> Last updated: 2026-11-20.
+> Last updated: 2026-11-21.
 
 ---
 
@@ -59,10 +59,16 @@ Measured on Colab G4 (96 GB) via `gis-grpo-pilot` (`TRL 1.18.1` `GRPOTrainer`, L
 | Qwen3.8-27B (think `low`, no vLLM) | 250–335 s | 191–257 s | 934–1,110 | 62.7 GB | Default `xhigh` hits 4096 cap (~650 s/step) |
 | Qwen3.8-27B + vLLM colocate (sleep mode) | OOM | — | — | >96 GB | 50 GB training weights + vLLM copy exceeds 96 GB |
 | Gemma 4 26B-A4B (think, no vLLM) | 800–940 s | 750–877 s | 2,383–2,779 | 61.4 GB | MoE slow without vLLM |
+| **Gemma 4 26B-A4B (Split 2×G4: vLLM + LoRA r=16)** | **~30–68 s** | **~24–62 s** | 500–800 | **67.3 GB** | **Verified 2026-11-21**: `g4-b` vLLM (`--enable-lora`) + `g4-a` bf16 trainer (3.1 s bwd, 74 MB LoRA, **43 ms** live hot-reload); **13×–25× faster** than single-card |
+| Gemma 4 E4B (no-think, no vLLM, max 768) | **~41 s** | ~37 s | 250–450 | ~24 GB | Verified 2026-11-21 (60 steps GRPO in ~41 min) |
 | Gemma 4 31B (think) | OOM | — | — | >96 GB | OOM on single-sample backward pass |
 
 ### Training Environment Gotchas (Verify Before P1 Runs)
+- **`colab` CLI non-interactive hangs**: Always pass `--auth=oauth2` and redirect stdin (`</dev/null`) when launching `colab new` / `colab exec` / `colab stop` from background tasks.
+- **`VLLM::EngineCore` zombie VRAM leak**: `pkill -f vllm.entrypoints` leaves `VLLM::EngineCore` holding GPU memory. Always kill with `pkill -9 -f 'vllm|VLLM|EngineCore'` before switching models or starting training.
 - **`torchao` conflict on Colab**: Preinstalled `torchao 0.10.0` conflicts with `peft`. Always run `pip uninstall -y torchao` before installing `trl` / `peft`.
-- **Gemma 4 multimodal LoRA module collision**: Gemma 4's vision/audio towers share short layer names (`q_proj`, `k_proj`, etc.) with the language model. Specify **full module paths** targeting only the language-model linear layers (`TARGETS=auto` in `gis-grpo-pilot/grpo_bench.py`).
+- **`vllm 0.34.0` + `trl 1.18.2` colocate `cutlass` error**: Single-card `vllm_mode="colocate"` can raise `ModuleNotFoundError: No module named 'cutlass'` under Colab's `vllm 0.34.0`. Either use native bf16 (`use_vllm=False`, ~41 s/step for E4B no-think) or use the **Split 2×G4** architecture (`g4-b` standalone vLLM with `VLLM_ALLOW_RUNTIME_LORA_UPDATING=1` + `--enable-lora` + `POST /v1/load_lora_adapter`, `43 ms` reload!).
+- **Gemma 4 multimodal LoRA module collision**: Gemma 4's vision/audio towers share short layer names (`q_proj`, `k_proj`, etc.) with the language model. Specify **full module paths** targeting only the language-model linear layers (`language_model.*`).
+- **Gemma 4 merged checkpoint vLLM reload**: When saving a merged Gemma 4 LoRA checkpoint for vLLM serving, call `AutoProcessor.from_pretrained(MODEL_ID).save_pretrained(merged_dir)` alongside `merged.save_pretrained` and `tokenizer.save_pretrained` — otherwise vLLM fails with `OSError: Can't load feature extractor` (missing `processor_config.json`).
 - **Qwen3.8-27B hybrid architecture**: Requires `flash-linear-attention` + `causal-conv1d`, and LoRA targets must include DeltaNet layers (`in_proj_qkv`, `in_proj_z`, `out_proj`) alongside attention/MLP projections.
 - **Checkpointing**: Always mirror checkpoints to Google Drive or download immediately to avoid session-drop loss.

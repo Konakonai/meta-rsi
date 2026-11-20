@@ -324,3 +324,212 @@ def test_oracle_gate_and_caught_exception_tracking():
         r = run_python_sandbox(swallow_code, w, track_caught=True)
         assert r["returncode"] == 0
         assert any("ZeroDivisionError" in e for e in r["caught_exceptions"])
+
+
+def test_strict_anonymization_minimal_prompt_and_new_harnesses():
+    """Verify zero residual domain leakage in anonymized diagnostics, minimal prompt, and baseline harnesses."""
+    from meta_rsi.meta_agent import MINIMAL_META_SYSTEM_PROMPT, build_failure_digest
+
+    repo_root = Path(__file__).resolve().parents[1]
+    for name in ("handcrafted.py", "runtime_meta.py"):
+        ok, reason = validate_harness_source((repo_root / "meta_rsi" / "harnesses" / name).read_text())
+        assert ok, f"{name} failed AST check: {reason}"
+
+    for forbidden in ("geopandas", "pyproj", "shapely", "workspace inspection", "skill contamination"):
+        assert forbidden not in MINIMAL_META_SYSTEM_PROMPT.lower()
+
+    tasks = [json.loads(line) for line in open(DATA_ROOT / "tasks.jsonl")]
+    t = next(
+        x for x in tasks
+        if x["family"] == "area_by_class" and x["split"] == "train" and abs(x["variants"]["low"]["lat"]) < 2.5
+    )
+    low_dir = DATA_ROOT / t["variants"]["low"]["dir"]
+    wm_script = (
+        "import glob, geopandas as gpd\n"
+        "f = sorted(glob.glob('*.geojson') + glob.glob('*.gpkg'))[0]\n"
+        "g = gpd.read_file(f).to_crs('EPSG:3857')\n"
+        "print(g.geometry.area.sum())\n"
+    )
+    orig = float(run_python_sandbox(wm_script, low_dir)["stdout"].strip().splitlines()[-1])
+    ok_neutral, diag_neutral, _ = _run_metamorphic_check(
+        wm_script, low_dir, orig, t["answer"], include_domain_hint=False
+    )
+    assert not ok_neutral
+    assert "probe_1" in diag_neutral
+    for leak in ("shift_and_shuffle", "crs_storage_flip", "local_aeqd_shift", "aeqd", "EPSG:3857", "UTM"):
+        assert leak.lower() not in diag_neutral.lower(), f"Leaked token {leak!r} in {diag_neutral}"
+
+    # Verify meta_gate_only hides metamorphic diagnostics completely
+    fake_eval = {
+        "summary": {
+            "n_tasks": 2,
+            "dev_low_rate": 0.5,
+            "meta_pass_rate": 0.0,
+            "in_loop_rate": 0.0,
+            "dev_error_rate": 0.5,
+            "avg_llm_calls": 1.0,
+        },
+        "records": [
+            {
+                "task_id": "t1",
+                "family": "area_by_class",
+                "dev_low_status": "ok",
+                "dev_low_ok": True,
+                "dev_low_value": 100.0,
+                "dev_low_truth": 100.0,
+                "meta_checked": True,
+                "meta_consistent": False,
+                "meta_diag": "METAMORPHIC_INCONSISTENCY (probe_1): ratio=3.5x",
+                "code": "print(100)",
+            },
+            {
+                "task_id": "t2",
+                "family": "large_route_length",
+                "dev_low_status": "exception",
+                "dev_low_ok": False,
+                "dev_low_stderr": "KeyError: 'id'",
+                "meta_checked": False,
+                "meta_consistent": False,
+                "meta_diag": "",
+                "code": "print(x)",
+            },
+        ],
+    }
+    dig_only = build_failure_digest(fake_eval, "meta_gate_only", minimal_prompt=True, hide_meta_diag=True)
+    assert "METAMORPHIC_INCONSISTENCY" not in dig_only
+    assert "ratio=3.5x" not in dig_only
+    assert "family=" not in dig_only
+
+
+def test_verifier_conservation_auditor_accepts_polar_and_rejects_bad():
+    """Zero-label conservation auditor accepts valid polar AEQD probe and rejects vacuous/distorted probes."""
+    from meta_rsi.verifier_agent import certify_perturbation_operator
+
+    tasks = [json.loads(line) for line in open(DATA_ROOT / "tasks.jsonl")]
+    t = next(x for x in tasks if x["family"] == "area_by_class" and x["split"] == "train")
+    low_dir = DATA_ROOT / t["variants"]["low"]["dir"]
+    utm_script = (
+        "import glob, geopandas as gpd\n"
+        "f = sorted(glob.glob('*.geojson') + glob.glob('*.gpkg'))[0]\n"
+        "g = gpd.read_file(f)\n"
+        "g = g.to_crs(g.estimate_utm_crs())\n"
+        "print(g.geometry.area.sum())\n"
+    )
+    orig = float(run_python_sandbox(utm_script, low_dir)["stdout"].strip().splitlines()[-1])
+    passing_cases = [(low_dir, utm_script, orig, t["answer"])]
+
+    # 1. Valid polar AEQD operator -> MUST be certified!
+    good_polar = '''
+import shutil
+from pathlib import Path
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import shapely
+from pyproj import CRS, Transformer
+
+def perturb(src_dir: Path, dst_dir: Path, seed: int = 42) -> dict:
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    layers = []
+    for p in sorted(src_dir.iterdir()):
+        if not p.is_file():
+            continue
+        ext = p.suffix.lower()
+        if ext in (".geojson", ".gpkg"):
+            g = gpd.read_file(p)
+            g4326 = g.to_crs("EPSG:4326") if g.crs else g.set_crs("EPSG:4326")
+            layers.append((p, ext, g4326))
+        elif ext == ".csv":
+            df = pd.read_csv(p)
+            if {"lon", "lat"}.issubset(df.columns):
+                g = gpd.GeoDataFrame(df.drop(columns=["lon", "lat"]), geometry=gpd.points_from_xy(df["lon"], df["lat"]), crs="EPSG:4326")
+                layers.append((p, ".csv", g))
+            else:
+                shutil.copy2(p, dst_dir / p.name)
+        else:
+            shutil.copy2(p, dst_dir / p.name)
+    b = np.array([g.total_bounds for _, _, g in layers])
+    cx, cy = 0.5 * float(b[:,0].min() + b[:,2].max()), 0.5 * float(b[:,1].min() + b[:,3].max())
+    c1 = CRS.from_proj4(f"+proj=aeqd +lat_0={cy} +lon_0={cx} +datum=WGS84 +units=m +no_defs")
+    c2 = CRS.from_proj4("+proj=aeqd +lat_0=86.2 +lon_0=15.0 +datum=WGS84 +units=m +no_defs")
+    t1 = Transformer.from_crs("EPSG:4326", c1, always_xy=True)
+    t2 = Transformer.from_crs(c2, "EPSG:4326", always_xy=True)
+    def xf(geoms, tr):
+        return [shapely.transform(g, lambda c: np.column_stack(tr.transform(c[:,0], c[:,1]))) for g in geoms]
+    for p, ext, g4326 in layers:
+        gn = gpd.GeoDataFrame(g4326.drop(columns="geometry").copy(), geometry=xf(xf(list(g4326.geometry), t1), t2), crs="EPSG:4326")
+        if ext == ".csv":
+            df = pd.DataFrame(gn.drop(columns="geometry"))
+            df["lon"], df["lat"] = gn.geometry.x.round(7), gn.geometry.y.round(7)
+            df.to_csv(dst_dir / p.name, index=False)
+        elif ext == ".gpkg":
+            gn.to_file(dst_dir / p.name, driver="GPKG")
+        else:
+            gn.to_file(dst_dir / p.name, driver="GeoJSON")
+    return {"mode": "polar_north"}
+'''
+    res_good = certify_perturbation_operator(good_polar, [low_dir], passing_cases)
+    assert res_good["certified"], f"Expected valid polar probe certified, got: {res_good}"
+    assert res_good["metrics"]["caught"] == 1
+
+    # 2. Identity vacuous operator -> MUST be rejected at non_vacuity!
+    vacuous = '''
+import shutil
+from pathlib import Path
+def perturb(src_dir: Path, dst_dir: Path, seed: int = 42) -> dict:
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for p in src_dir.iterdir():
+        if p.is_file():
+            shutil.copy2(p, dst_dir / p.name)
+    return {"mode": "noop"}
+'''
+    res_vac = certify_perturbation_operator(vacuous, [low_dir], passing_cases)
+    assert not res_vac["certified"] and res_vac["stage"] == "non_vacuity"
+
+    # 3. Non-isometric distorted operator (scales geometry 2x) -> MUST be rejected at conservation!
+    distorted = '''
+import shutil
+from pathlib import Path
+import geopandas as gpd
+import shapely.affinity
+def perturb(src_dir: Path, dst_dir: Path, seed: int = 42) -> dict:
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for p in src_dir.iterdir():
+        if p.is_file() and p.suffix.lower() in (".geojson", ".gpkg"):
+            g = gpd.read_file(p)
+            g4326 = g.to_crs("EPSG:4326") if g.crs else g.set_crs("EPSG:4326")
+            g4326["geometry"] = [shapely.affinity.scale(x, xfact=2.0, yfact=2.0) for x in g4326.geometry]
+            g4326.to_file(dst_dir / p.name, driver="GPKG" if p.suffix.lower() == ".gpkg" else "GeoJSON")
+        elif p.is_file():
+            shutil.copy2(p, dst_dir / p.name)
+    return {"mode": "scale_2x"}
+'''
+    res_bad = certify_perturbation_operator(distorted, [low_dir], passing_cases)
+    assert not res_bad["certified"] and res_bad["stage"] == "conservation"
+
+
+def test_extract_hypothesis_preserves_channel_tag_in_code():
+    """Stripping reasoning tags must never split on `<channel|>` inside harness source literals."""
+    from meta_rsi.meta_agent import _extract_hypothesis_and_code
+
+    raw = (
+        "thought\nI should improve the harness.\n<channel|>"
+        "HYPOTHESIS: Keep channel stripping intact.\n"
+        "```python\n"
+        "def extract_code(text):\n"
+        "    for tag in ('</think>', '<channel|>'):\n"
+        "        if tag in text:\n"
+        "            text = text.rsplit(tag, 1)[1]\n"
+        "    return text\n"
+        "\n"
+        "def solve(task_prompt, workdir, llm, exec_fn):\n"
+        "    return None, {'llm_calls': 0}\n"
+        "```\n"
+    )
+    hyp, code = _extract_hypothesis_and_code(raw)
+    assert "Keep channel stripping intact" in hyp
+    assert code is not None
+    assert "def extract_code(text):" in code
+    assert "'<channel|>'" in code
+    assert "def solve(" in code
+

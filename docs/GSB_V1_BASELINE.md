@@ -10,7 +10,7 @@
 - **Scale**: 3,180 tasks across 21 families (`18 seen × 150 train` = 2,700 train; `18 seen × 20 test + 3 held-out × 40 test` = 480 test).
 - **Three task groups**:
   1. **Local projection-dependent (12 seen + 3 held-out)**: buffers, distances, areas, perimeters, overlays, road lengths (`density_in_polygon`, `road_buffer_area`, `max_pair_distance` held out).
-  2. **Non-projection methodological traps (4 seen)**: `points_in_polygon`, `area_weighted_population`, `covered_population` (deduplication), `mean_per_district` (zero-count districts). `roads_in_district` additionally distinguishes `within`, `intersects`, and clipping.
+  2. **Methodological traps (4 seen)**: 3 purely non-projection families (`points_in_polygon`, `area_weighted_population`, `mean_per_district`, where `EPSG:3857` passes `170/170`) plus `covered_population` (metric-buffer deduplication trap; projection-dependent, failing `EPSG:3857` on `166/170` tasks). `roads_in_district` additionally distinguishes `within`, `intersects`, and clipping.
   3. **Large-extent geodesic (2 seen)**: `large_region_area`, `large_route_length` spanning tens of degrees; ground truth via `pyproj.Geod` on WGS84.
 - **Multi-location oracle (`low`, `high`/`mid`, `zone_edge`)**: Each task places identical local geometry at 3 global locations. Prompts omit location and CRS; 25% of `.gpkg` layers are stored in local UTM; point layers may be CSV (`lon`, `lat`).
 - **Ground-truth accuracy check** (`scripts/check_aeqd_truth.py`, 1,000 random 20–30 km shapes across latitudes `0–64°`): bbox-centered AEQD agrees with ellipsoidal `pyproj.Geod` within **0.00007%** (area), **0.00003%** (length), and **0.00005%** (distance).
@@ -20,7 +20,7 @@
 | Solver Method | Outcome on 3,180 Tasks (`data/v1`) |
 |---|---|
 | Reference (AEQD local / `Geod` large) | **3,180 / 3,180** correct |
-| `estimate_utm_crs()` | All local tasks pass; fails large-extent (`12/170` area, `14/170` route) |
+| `estimate_utm_crs()` | All local tasks pass; fails large-extent (`158/170` area [`12/170` pass], `156/170` route [`14/170` pass]) |
 | `EPSG:3857` (3-location oracle) | Fails 100% of length/area families; fails `147–166 / 170` count-by-distance tasks; passes non-projection families (by design) |
 | `EPSG:3857` (**`low` variant only**) | **Spuriously passes** `147–164 / 170` length tasks and `73–79 / 170` area tasks |
 | Fixed `EPSG:32630` (UTM 30N) | Fails `122–170 / 170` projection-dependent tasks |
@@ -90,7 +90,7 @@ Evaluating only the equatorial (`low`) variant dramatically overstates accuracy 
 
 ### 3.1 Rule + `gemini-decision-1` Error Taxonomy (5,754 Runnable-but-Wrong Answers)
 
-- **Method**: Deterministic re-execution fingerprinting (`scripts/classify_errors.py`) attributed **5,108 / 5,754 (88.8%)** runnable-but-wrong answers across the 4 base/hint/26B/27B runs. The remaining 731 unattributed answers were classified by `gemini-decision-1` (`scripts/classify_llm.py`, v2 14-class schema).
+- **Method**: Deterministic re-execution fingerprinting (`scripts/classify_errors.py`, pass r2) attributed **5,108 / 5,754 (88.8%)** runnable-but-wrong answers across the 4 base/hint/26B/27B runs; the 646 residual unattributed answers plus 85 newly added pass-2 cases (`latlon_order` + `nn_in_degrees`, 731 total) were classified by `gemini-decision-1` (`scripts/classify_llm.py`, v2 14-class schema).
 - **Agreement & Calibration**:
   - Rules vs `gemini-decision-1` (5,012 rule-labeled answers, pass 1): **97.2% agreement**, Cohen's $\kappa = 0.948$ ($\kappa = 0.970$ for confidence $\ge 0.8$).
   - Independent blind spot-check on 60 random unattributed answers (v2 schema, Claude blind labeling): overall **82% agreement** ($\kappa = 0.79$); confidence $\ge 0.7$: **87%** ($\kappa = 0.85$); confidence $\ge 0.9$: **93%** ($\kappa = 0.92$).
@@ -123,4 +123,4 @@ Models often explicitly verbalize Web Mercator distortion in their reasoning tra
    - Projection errors drop `50.4% -> 2.0%` and `lucky` drops `26.9% -> 0.3%`, **but runtime crashes double (`21.4% -> 41.8%`)**.
    - Median script length nearly doubles (`44 -> 80` lines) as the model forces `estimate_utm_crs` / `Geod` into 3,833/3,840 answers — causing non-projection tasks to collapse: `points_in_polygon` (`78.7% -> 41.9%`), `area_weighted_population` (`43.8% -> 8.7%`), `mean_per_district` (`22.5% -> 13.8%`).
    - **Swallowed exceptions (`scripts/caught_exceptions.py` via `sys.monitoring`)**: among runnable-but-wrong scripts under explicit rules, **26% (143/546)** caught a runtime exception (`AttributeError`, `GeodError`, `CRSError`) and printed `0` anyway — vs only **0.8% (18/2,159)** without rules.
-3. **Contrast with `meta-rsi`**: Our metamorphic-gated evolved 4B no-think harness avoids static rule bloat (`81.8 ± 3.3%` Test ALL, `7.5%` error, `2.3%` lucky), showing why execution-verified structural harness evolution outperforms hand-written prompt rules.
+3. **Contrast with `meta-rsi`**: Our metamorphic-gated evolved 4B no-think harness avoids static rule bloat (v0.2 4-seed `78.4 ± 3.8%` Test ALL, `8.9%` error, `2.1%` lucky; zero-leakage v4 `meta_neutral` up to `84.6%`, and co-evolved polar harness `87.3%` Test ALL, `1.7%` error, `0.6%` lucky), showing why execution-verified structural harness evolution outperforms hand-written prompt rules.

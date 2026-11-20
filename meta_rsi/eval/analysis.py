@@ -104,7 +104,7 @@ def print_ood_report(ood_dir: Path, seeds: list[int], gates: list[str], gate_lab
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Statistical analysis of multi-seed RSI evolution + unseen test / OOD eval")
-    ap.add_argument("eval_dir", nargs="?", default="runs/eval150", help="Directory with unseen test JSONs (default: runs/eval150)")
+    ap.add_argument("eval_dir", nargs="?", default="runs/eval480", help="Directory with unseen test JSONs (default: runs/eval480)")
     ap.add_argument("--ood-dir", default="", help="Optional directory with Polar OOD eval JSONs (e.g. runs/eval_ood)")
     args = ap.parse_args()
     eval_dir = Path(args.eval_dir)
@@ -206,8 +206,8 @@ def main() -> None:
                     f"wins={wins}/{len(common)}  paired_t={t_stat:+.2f}, p={p_val:.4f}"
                 )
 
-    # Category breakdown: Local projection-dependent vs Non-projection traps vs Large-extent geodesic
-    non_proj_fams = {"points_in_polygon", "area_weighted_population", "covered_population", "mean_per_district"}
+    # Category breakdown: Local projection-dependent (16, incl. covered_population) vs Non-projection traps (3) vs Large-extent geodesic (2)
+    non_proj_fams = {"points_in_polygon", "area_weighted_population", "mean_per_district"}
     large_fams = {"large_region_area", "large_route_length"}
 
     def _subset_acc(per_fam: dict[str, dict], pred) -> tuple[float, float, int]:
@@ -222,8 +222,8 @@ def main() -> None:
         return (tot_c / tot_n if tot_n else 0.0), (tot_l / tot_n if tot_n else 0.0), tot_n
 
     groups = [
-        ("LOCAL_PROJ (15)", lambda f: f not in non_proj_fams and f not in large_fams),
-        ("NON_PROJ_TRAP (4)", lambda f: f in non_proj_fams),
+        ("LOCAL_PROJ (16)", lambda f: f not in non_proj_fams and f not in large_fams),
+        ("NON_PROJ_TRAP (3)", lambda f: f in non_proj_fams),
         ("LARGE_EXTENT (2)", lambda f: f in large_fams),
     ]
     print(f"\n=== BREAKDOWN BY TASK CATEGORY ON {n_all}-TASK TEST SET (correct% / lucky%) ===")

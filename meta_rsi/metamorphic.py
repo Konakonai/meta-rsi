@@ -26,11 +26,38 @@ import numpy as np
 import pandas as pd
 import shapely
 import shapely.affinity
-from pyproj import CRS, Transformer
-
-from benchmarks.gsb.geo import local_crs
+from pyproj import CRS, Geod, Transformer
 
 SPATIAL_EXTS = {".geojson", ".gpkg", ".csv"}
+_WGS84_GEOD = Geod(ellps="WGS84")
+
+
+def _aeqd_crs(lat: float, lon: float) -> CRS:
+    """Self-contained local Azimuthal Equidistant CRS (no benchmark package import)."""
+    return CRS.from_proj4(
+        f"+proj=aeqd +lat_0={lat} +lon_0={lon} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+    )
+
+
+def _geodesic_rotate_relocate(geom, cx: float, cy: float, tx: float, ty: float, rot_deg: float = 90.0):
+    """Near-exact WGS84 geodesic polar transfer + bearing rotation around centroid."""
+    def f(coords):
+        lons, lats = coords[:, 0], coords[:, 1]
+        az12, _, dist = _WGS84_GEOD.inv(
+            np.full_like(lons, cx, dtype=float),
+            np.full_like(lats, cy, dtype=float),
+            lons,
+            lats,
+        )
+        nlons, nlats, _ = _WGS84_GEOD.fwd(
+            np.full_like(lons, tx, dtype=float),
+            np.full_like(lats, ty, dtype=float),
+            az12 + rot_deg,
+            dist,
+        )
+        return np.column_stack([nlons, nlats])
+
+    return shapely.transform(geom, f)
 
 
 def _load_workspace_layers(work_dir: Path) -> list[tuple[Path, str, gpd.GeoDataFrame, CRS | None]]:
@@ -141,8 +168,8 @@ def perturb_workspace(
     rng = np.random.default_rng(seed)
 
     if not is_large:
-        tr_to_plane = Transformer.from_crs("EPSG:4326", local_crs(cy, cx), always_xy=True)
-        tr_to_target = Transformer.from_crs(local_crs(target_lat, target_lon), "EPSG:4326", always_xy=True)
+        tr_to_plane = Transformer.from_crs("EPSG:4326", _aeqd_crs(cy, cx), always_xy=True)
+        tr_to_target = Transformer.from_crs(_aeqd_crs(target_lat, target_lon), "EPSG:4326", always_xy=True)
         mode = "local_aeqd_shift"
         meta = {
             "mode": mode,
@@ -151,28 +178,72 @@ def perturb_workspace(
             "span_deg": [round(span_lat, 3), round(span_lon, 3)],
         }
     else:
-        # Choose a clean longitude shift keeping all coordinates safely inside [-172, 172].
-        cand_shifts = [72.0, -72.0, 54.0, -54.0, 36.0, -36.0]
-        lon_shift = 0.0
-        for s in cand_shifts:
-            if minx + s > -172.0 and maxx + s < 172.0:
-                lon_shift = s
+        # Non-6-degree-multiple longitude shift + 90-degree geodesic bearing rotation around centroid
+        # (breaks both Web Mercator and single-zone UTM distortion while preserving WGS84 geodesic
+        # area/length to <0.01%). Falls back to lat-mirror + non-6-multiple shift if bounds exceed safe box.
+        cand_tx = []
+        for s in (73.7, -73.7, 51.3, -51.3, 31.7, -31.7, 15.3, -15.3):
+            tx = cx + s
+            if -140.0 <= tx <= 140.0:
+                cand_tx.append(tx)
+        cand_tx.append(cx)
+        rot_plan = None
+        for tx in cand_tx:
+            for ty in (28.0, -28.0, 0.0):
+                for rot_deg in (90.0, -90.0):
+                    ok_box = True
+                    trial_geoms = []
+                    for _, _, gdf4326, _ in layers:
+                        ng = [_orient_if_polygonal(_geodesic_rotate_relocate(g, cx, cy, tx, ty, rot_deg)) for g in gdf4326.geometry]
+                        tmp_g = gpd.GeoSeries(ng, crs="EPSG:4326")
+                        tb = tmp_g.total_bounds
+                        if tb[0] < -172.0 or tb[2] > 172.0 or tb[1] < -78.0 or tb[3] > 78.0:
+                            ok_box = False
+                            break
+                        trial_geoms.append(ng)
+                    if ok_box:
+                        rot_plan = (tx, ty, rot_deg, trial_geoms)
+                        break
+                if rot_plan is not None:
+                    break
+            if rot_plan is not None:
                 break
-        mode = "large_ellipsoidal_isometry"
-        meta = {
-            "mode": mode,
-            "src_center": [round(cy, 3), round(cx, 3)],
-            "lon_shift": lon_shift,
-            "lat_mirror": True,
-            "span_deg": [round(span_lat, 3), round(span_lon, 3)],
-        }
+
+        if rot_plan is not None:
+            tx, ty, rot_deg, large_rotated_geoms = rot_plan
+            mode = "large_geodesic_rotation"
+            meta = {
+                "mode": mode,
+                "src_center": [round(cy, 3), round(cx, 3)],
+                "dst_center": [round(ty, 3), round(tx, 3)],
+                "rot_deg": rot_deg,
+                "span_deg": [round(span_lat, 3), round(span_lon, 3)],
+            }
+        else:
+            large_rotated_geoms = None
+            cand_shifts = [73.7, -73.7, 51.3, -51.3, 31.7, -31.7]
+            lon_shift = 0.0
+            for s in cand_shifts:
+                if minx + s > -172.0 and maxx + s < 172.0:
+                    lon_shift = s
+                    break
+            mode = "large_ellipsoidal_isometry"
+            meta = {
+                "mode": mode,
+                "src_center": [round(cy, 3), round(cx, 3)],
+                "lon_shift": lon_shift,
+                "lat_mirror": True,
+                "span_deg": [round(span_lat, 3), round(span_lon, 3)],
+            }
 
     # For local projected GPKG output, compute one shared target UTM CRS if needed.
     transformed: list[tuple[Path, str, gpd.GeoDataFrame, CRS | None]] = []
-    for path, kind, gdf4326, orig_crs in layers:
+    for idx, (path, kind, gdf4326, orig_crs) in enumerate(layers):
         if not is_large:
             plane_geoms = _transform_geoms(list(gdf4326.geometry), tr_to_plane)
             new_geoms = _transform_geoms(plane_geoms, tr_to_target)
+        elif large_rotated_geoms is not None:
+            new_geoms = large_rotated_geoms[idx]
         else:
             new_geoms = [
                 _orient_if_polygonal(

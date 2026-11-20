@@ -95,6 +95,7 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--seen-per-family", type=int, default=5)
     ap.add_argument("--heldout-per-family", type=int, default=20)
+    ap.add_argument("--protocol", default="A", choices=["A", "B"], help="A = generate code on equatorial low_dir and replay on polar; B = deploy harness.solve() directly on polar workspaces")
     ap.add_argument("--track-caught", action="store_true")
     a = ap.parse_args()
 
@@ -129,17 +130,63 @@ def main() -> None:
         return r.text
 
     def eval_one(task: dict) -> dict:
-        low_dir = data_root / task["variants"]["low"]["dir"]
-        run = run_harness_on_workspace(
-            harness_mod,
-            task["prompt"],
-            low_dir,
-            llm_fn,
-            max_llm_calls=a.max_llm_calls,
-            exec_timeout=a.exec_timeout,
-        )
-        sc = score_polar_ood(task, run["code"], data_root, timeout=a.exec_timeout, track_caught=a.track_caught)
-        return {"family": task["family"], "llm_calls": run["llm_calls"], **sc}
+        low_info = task["variants"]["low"]
+        low_dir = data_root / low_info["dir"]
+        if a.protocol == "A":
+            run = run_harness_on_workspace(
+                harness_mod,
+                task["prompt"],
+                low_dir,
+                llm_fn,
+                max_llm_calls=a.max_llm_calls,
+                exec_timeout=a.exec_timeout,
+            )
+            sc = score_polar_ood(task, run["code"], data_root, timeout=a.exec_timeout, track_caught=a.track_caught)
+            return {"family": task["family"], "llm_calls": run["llm_calls"], **sc}
+
+        # Protocol B: deploy harness.solve() directly on each polar workspace (tests live execute-inspect-repair on polar data)
+        truth = low_info["truth"]
+        ans = task["answer"]
+        variants: dict[str, dict] = {}
+        any_swallowed = False
+        total_calls = 0
+        for name, kwargs in POLAR_TARGETS:
+            with tempfile.TemporaryDirectory() as tmp:
+                pdir = Path(tmp) / name
+                perturb_workspace(low_dir, pdir, **kwargs)
+                run = run_harness_on_workspace(
+                    harness_mod,
+                    task["prompt"],
+                    pdir,
+                    llm_fn,
+                    max_llm_calls=a.max_llm_calls,
+                    exec_timeout=a.exec_timeout,
+                )
+                total_calls += run["llm_calls"]
+                code = run["code"]
+                if code is None:
+                    variants[name] = {"status": "no_code"}
+                    continue
+                r = run_python_sandbox(code, pdir, timeout=a.exec_timeout, track_caught=a.track_caught)
+                if a.track_caught and r.get("caught_exceptions"):
+                    any_swallowed = True
+                if r["timed_out"]:
+                    variants[name] = {"status": "timeout"}
+                elif r["returncode"] != 0:
+                    tail = (r["stderr"].strip().splitlines() or [""])[-1][:200]
+                    variants[name] = {"status": "exception", "stderr": tail}
+                else:
+                    val = parse_final_number(r["stdout"])
+                    if val is None:
+                        variants[name] = {"status": "no_number"}
+                    else:
+                        variants[name] = {"status": "ok", "value": val, "correct": bool(matches(val, truth, ans))}
+        if any(v["status"] != "ok" for v in variants.values()):
+            cat = "error"
+        else:
+            n_ok = sum(1 for v in variants.values() if v["correct"])
+            cat = "correct" if n_ok == len(variants) else ("silent_wrong" if n_ok == 0 else "lucky")
+        return {"family": task["family"], "llm_calls": total_calls / max(len(POLAR_TARGETS), 1), "category": cat, "variants": variants, "swallowed": any_swallowed}
 
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
@@ -175,6 +222,7 @@ def main() -> None:
     all_cnt = seen_cats + ho_cats
     out_obj = {
         "harness": a.harness,
+        "protocol": a.protocol,
         "ood_targets": [name for name, _ in POLAR_TARGETS],
         "model": a.task_model,
         "temp": a.task_temp,

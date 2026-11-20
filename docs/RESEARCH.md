@@ -44,7 +44,7 @@ Reproducible anytime via `python -m meta_rsi.eval.analysis runs/eval480 --ood-di
 
 ### Task Category Breakdown (Full `n = 480`, `correct% / lucky%`)
 
-| Method | `LOCAL_PROJ` (15 families) | `NON_PROJ_TRAP` (4 families) | `LARGE_EXTENT` (2 families) |
+| Method | `LOCAL_PROJ` (15 families) | `NON_PROJ_TRAP` (4 families)* | `LARGE_EXTENT` (2 families) |
 |---|---:|---:|---:|
 | Gen-0 Seed | 18.6% / 37.8% | 42.5% / 10.0% | 37.5% / 15.0% |
 | `naive` | 70.6 ± 30.4% / 22.1% | 52.2 ± 9.9% / 9.1% | 62.5 ± 28.1% / 6.2% |
@@ -52,7 +52,7 @@ Reproducible anytime via `python -m meta_rsi.eval.analysis runs/eval480 --ood-di
 | **`metamorphic` (Ours)** | **87.4 ± 4.3% / 1.7%** | **51.9 ± 8.8% / 1.9%** | 51.2 ± 16.4% / 6.2% |
 
 Key diagnostic insights from the full-480 breakdown:
-1. **Zero skill contamination on non-projection tasks**: Unlike hand-written CRS rules (`e4b_think_rules`, which collapsed `points_in_polygon` `78.7% -> 41.9%` and `area_weighted_population` `43.8% -> 8.7%`), `metamorphic` *improves* `NON_PROJ_TRAP` (`42.5% -> 51.9%`, with only `1.9%` lucky).
+1. **Zero skill contamination on non-projection tasks**: Unlike hand-written CRS rules (`e4b_think_rules`, which collapsed `points_in_polygon` `78.7% -> 41.9%` and `area_weighted_population` `43.8% -> 8.7%`), `metamorphic` *improves* `NON_PROJ_TRAP` (`42.5% -> 51.9%`, with only `1.9%` lucky). *(\*Audit note: v0.2 grouped `covered_population` inside `NON_PROJ_TRAP`; per `gsb_v1_audit.log`, `covered_population` uses a metric buffer and fails `EPSG:3857` on `166/170` tasks, so `meta_rsi/eval/analysis.py` has been updated to restrict `NON_PROJ_TRAP` to the 3 purely projection-invariant families: `points_in_polygon`, `area_weighted_population`, `mean_per_district`.)*
 2. **Principled headroom on `LARGE_EXTENT`**: Our current large-extent isometry (longitude shift + latitude mirror) preserves single-UTM-zone distortion when the UTM zone tracks the shifted centroid, explaining why `LARGE_EXTENT` stays at `51.2%` — motivating **self-discovered / stronger invariance operators** in Phase P1.
 
 ### Polar OOD Stress Test (`runs/eval_ood/`, Full `n = 440` Local Tasks, `>84°N / <80°S`)

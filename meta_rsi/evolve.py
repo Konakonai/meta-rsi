@@ -73,8 +73,11 @@ def run_evolution(
     test_seen_per_family: int = 1,
     test_heldout_per_family: int = 6,
     max_llm_calls: int = 4,
+    max_exec_calls: int = 12,
     max_regress: int = 0,
     allow_stepping_stone: bool = True,
+    soft_regress_delta: float = 0.06,
+    parent_policy: str = "auto",
     exec_timeout: float = 25.0,
     workers: int = 4,
     seed: int = 0,
@@ -82,6 +85,8 @@ def run_evolution(
     eval_oracle_all: bool = False,
     limit_dev: int = 0,
     include_domain_hint: bool = False,
+    minimal_meta_prompt: bool = False,
+    custom_probes: list[tuple[str, object]] | None = None,
     track_caught: bool = False,
 ) -> LineageArchive:
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -95,7 +100,7 @@ def run_evolution(
     dev_tasks = splits["dev"][:limit_dev] if limit_dev else splits["dev"]
     test_seen = splits["test_seen"]
     test_heldout = splits["test_heldout"]
-    check_meta = gate_mode == "metamorphic"
+    check_meta = gate_mode in ("metamorphic", "meta_soft", "meta_gate_only")
     use_oracle_gate = gate_mode == "oracle"
     rng = random.Random(seed)
 
@@ -103,15 +108,27 @@ def run_evolution(
         "gate_mode": gate_mode,
         "generations": generations,
         "dev_tasks": len(dev_tasks),
+        "dev_per_family": dev_per_family,
+        "dev_offset": dev_offset,
         "test_seen": len(test_seen),
         "test_heldout": len(test_heldout),
         "task_backend": task_llm.backend,
         "task_model": task_llm.model,
+        "task_temp": task_llm.temperature,
+        "task_enable_thinking": task_llm.enable_thinking,
         "meta_backend": meta_llm.backend,
         "meta_model": meta_llm.model,
+        "meta_temp": meta_llm.temperature,
+        "meta_thinking_level": meta_llm.thinking_level,
         "max_llm_calls": max_llm_calls,
+        "max_exec_calls": max_exec_calls,
         "max_regress": max_regress,
+        "allow_stepping_stone": allow_stepping_stone,
+        "soft_regress_delta": soft_regress_delta,
+        "parent_policy": parent_policy,
         "include_domain_hint": include_domain_hint,
+        "minimal_meta_prompt": minimal_meta_prompt,
+        "custom_probes": [p[0] for p in (custom_probes or [])],
         "track_caught": track_caught,
         "seed": seed,
     }
@@ -125,7 +142,7 @@ def run_evolution(
           f"dev={len(dev_tasks)}, test_seen={len(test_seen)}, heldout={len(test_heldout)} ===", flush=True)
     print(header, flush=True)
 
-    archive = LineageArchive(exp_dir, gate_mode)
+    archive = LineageArchive(exp_dir, gate_mode, parent_policy=parent_policy)
     eval_cache: dict[int, dict] = {}
     history_path = exp_dir / "history.jsonl"
 
@@ -144,10 +161,12 @@ def run_evolution(
         task_llm,
         check_metamorphic=check_meta,
         include_domain_hint=include_domain_hint,
+        custom_probes=custom_probes,
         use_oracle_in_loop=use_oracle_gate,
         track_caught=track_caught,
         compute_oracle=True,
         max_llm_calls=max_llm_calls,
+        max_exec_calls=max_exec_calls,
         exec_timeout=exec_timeout,
         workers=workers,
     )
@@ -249,6 +268,9 @@ def run_evolution(
                 archive.attempts,
                 gate_mode,
                 partner=partner,
+                minimal_prompt=minimal_meta_prompt,
+                hide_meta_diag=(gate_mode == "meta_gate_only"),
+                pick_seed=seed * 31 + gen,
             )
         except Exception as exc:
             msg = f"meta_propose_failed: {exc}"
@@ -278,10 +300,12 @@ def run_evolution(
             task_llm,
             check_metamorphic=check_meta,
             include_domain_hint=include_domain_hint,
+            custom_probes=custom_probes,
             use_oracle_in_loop=use_oracle_gate,
             track_caught=track_caught,
             compute_oracle=True,
             max_llm_calls=max_llm_calls,
+            max_exec_calls=max_exec_calls,
             exec_timeout=exec_timeout,
             workers=workers,
         )
@@ -292,6 +316,7 @@ def run_evolution(
             cand_dev,
             max_regress=max_regress,
             allow_stepping_stone=allow_stepping_stone,
+            soft_regress_delta=soft_regress_delta,
         )
 
         ora_seen_rate = None
@@ -415,7 +440,11 @@ def main() -> None:
     ap.add_argument("--exp", required=True, help="Experiment name under --runs-dir")
     ap.add_argument("--runs-dir", default="runs")
     ap.add_argument("--data-root", default="data/v1")
-    ap.add_argument("--gate", default="metamorphic", choices=["naive", "preserve", "metamorphic", "oracle"])
+    ap.add_argument(
+        "--gate",
+        default="metamorphic",
+        choices=["naive", "preserve", "darwinx_soft", "meta_soft", "meta_gate_only", "metamorphic", "oracle"],
+    )
     ap.add_argument("--generations", type=int, default=6)
     ap.add_argument("--dev-per-family", type=int, default=1)
     ap.add_argument("--dev-offset", type=int, default=0)
@@ -423,9 +452,14 @@ def main() -> None:
     ap.add_argument("--test-heldout-per-family", type=int, default=6)
     ap.add_argument("--limit-dev", type=int, default=0, help="Optional cap on dev task count for fast smoke runs")
     ap.add_argument("--max-llm-calls", type=int, default=4)
+    ap.add_argument("--max-exec-calls", type=int, default=12)
     ap.add_argument("--max-regress", type=int, default=0)
     ap.add_argument("--no-stepping-stone", action="store_true")
+    ap.add_argument("--soft-regress-delta", type=float, default=0.06, help="Max regression fraction for darwinx_soft/meta_soft/meta_gate_only")
+    ap.add_argument("--parent-policy", default="auto", choices=["auto", "best", "dgm"])
+    ap.add_argument("--seed-harness", default="", help="Optional starting harness.py path (defaults to harnesses/seed.py)")
     ap.add_argument("--meta-domain-hints", action="store_true", help="Include GIS/tabular root-cause hints in metamorphic diagnostics (off by default for strict domain neutrality)")
+    ap.add_argument("--minimal-meta-prompt", action="store_true", help="Use minimal zero-blueprint, zero-domain-library Meta-Agent system prompt and hide family names")
     ap.add_argument("--track-caught-exceptions", action="store_true", help="Use sys.monitoring to track swallowed exceptions in dev scripts")
     ap.add_argument("--exec-timeout", type=float, default=25.0)
     ap.add_argument("--workers", type=int, default=4)
@@ -444,6 +478,7 @@ def main() -> None:
     ap.add_argument("--meta-url", default="http://127.0.0.1:8000/v1")
     ap.add_argument("--meta-temp", type=float, default=0.5)
     ap.add_argument("--meta-max-tokens", type=int, default=16384)
+    ap.add_argument("--meta-no-think", action="store_true")
     ap.add_argument("--meta-thinking-level", default="low", choices=["minimal", "low", "medium", "high"])
     a = ap.parse_args()
 
@@ -461,6 +496,7 @@ def main() -> None:
         base_url=a.meta_url,
         temperature=a.meta_temp,
         max_tokens=a.meta_max_tokens,
+        enable_thinking=not a.meta_no_think,
         thinking_level=a.meta_thinking_level,
     )
     run_evolution(
@@ -475,14 +511,19 @@ def main() -> None:
         test_seen_per_family=a.test_seen_per_family,
         test_heldout_per_family=a.test_heldout_per_family,
         max_llm_calls=a.max_llm_calls,
+        max_exec_calls=a.max_exec_calls,
         max_regress=a.max_regress,
         allow_stepping_stone=not a.no_stepping_stone,
+        soft_regress_delta=a.soft_regress_delta,
+        parent_policy=a.parent_policy,
         exec_timeout=a.exec_timeout,
         workers=a.workers,
         seed=a.seed,
+        seed_harness_path=Path(a.seed_harness) if a.seed_harness else None,
         eval_oracle_all=a.eval_oracle_all,
         limit_dev=a.limit_dev,
         include_domain_hint=a.meta_domain_hints,
+        minimal_meta_prompt=a.minimal_meta_prompt,
         track_caught=a.track_caught_exceptions,
     )
 

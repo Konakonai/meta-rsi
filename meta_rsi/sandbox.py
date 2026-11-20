@@ -199,11 +199,12 @@ def run_harness_on_workspace(
     llm_complete: Callable[[str, str], str],
     *,
     max_llm_calls: int = 4,
+    max_exec_calls: int = 12,
     exec_timeout: float = 25.0,
     python: str = sys.executable,
 ) -> dict:
-    """Invoke `harness_mod.solve(...)` with strict LLM call-budget and workspace isolation."""
-    call_counter = {"n": 0}
+    """Invoke `harness_mod.solve(...)` with strict LLM & execution call-budget and workspace isolation."""
+    call_counter = {"n": 0, "exec": 0}
 
     def guarded_llm(system: str, user: str) -> str:
         if call_counter["n"] >= max_llm_calls:
@@ -212,6 +213,9 @@ def run_harness_on_workspace(
         return llm_complete(system, user)
 
     def guarded_run(code: str, wdir: Path | str | None = None, timeout: float = exec_timeout) -> dict:
+        if call_counter["exec"] >= max_exec_calls:
+            raise RuntimeError(f"Harness exceeded max_exec_calls={max_exec_calls}")
+        call_counter["exec"] += 1
         target = Path(wdir) if wdir is not None else work_copy
         eff_timeout = min(float(timeout), exec_timeout)
         return run_python_sandbox(code, target, timeout=eff_timeout, python=python)

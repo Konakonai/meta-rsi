@@ -71,41 +71,58 @@ def _run_metamorphic_check(
     timeout: float = 25.0,
     python: str = sys.executable,
     include_domain_hint: bool = False,
+    custom_probes: list[tuple[str, object]] | None = None,
+    track_caught: bool = False,
 ) -> tuple[bool, str, dict]:
     """Label-free self-consistency check: run `code` on T(src_dir) and compare to `orig_val`.
 
-    By default (`include_domain_hint=False`), diagnostics are strictly domain-neutral and
-    report only the observed numeric/runtime drift under the label-preserving transformation.
+    By default (`include_domain_hint=False`), diagnostics are STRICTLY domain-neutral:
+    probe names are anonymized (`probe_1`, `probe_2`, ...) and internal transform mode names
+    (`local_aeqd_shift`, `crs_storage_flip`, etc.) are NEVER revealed to the Meta-Agent.
     """
     has_gpkg = any(p.suffix.lower() == ".gpkg" for p in src_dir.iterdir() if p.is_file())
-    checks = [("shift_and_shuffle", dict(target_lat=58.3, target_lon=6.0, shuffle_rows=True, flip_gpkg_crs=False, seed=42))]
+    checks: list[tuple[str, dict | object]] = [
+        ("shift_and_shuffle", dict(target_lat=58.3, target_lon=6.0, shuffle_rows=True, flip_gpkg_crs=False, seed=42))
+    ]
     if has_gpkg:
         checks.append(("crs_storage_flip", dict(target_lat=-56.2, target_lon=12.0, shuffle_rows=True, flip_gpkg_crs=True, seed=99)))
+    if custom_probes:
+        for pname, pfn in custom_probes:
+            checks.append((pname, pfn))
 
     details: dict = {}
-    for name, kwargs in checks:
+    for idx, (name, spec) in enumerate(checks, 1):
+        label = name if include_domain_hint else f"probe_{idx}"
         with tempfile.TemporaryDirectory() as tmp:
             pert_dir = Path(tmp) / "pert"
-            pmeta = perturb_workspace(src_dir, pert_dir, **kwargs)
-            res = run_python_sandbox(code, pert_dir, timeout=timeout, python=python)
+            if callable(spec):
+                pert_dir.mkdir(parents=True, exist_ok=True)
+                pmeta = spec(src_dir, pert_dir)
+            else:
+                pmeta = perturb_workspace(src_dir, pert_dir, **spec)
+            res = run_python_sandbox(code, pert_dir, timeout=timeout, python=python, track_caught=track_caught)
         if res["timed_out"]:
-            return False, f"METAMORPHIC_TIMEOUT ({name}): script timed out under equivalent input perturbation.", {name: {"meta": pmeta, "status": "timeout"}}
+            return False, f"METAMORPHIC_TIMEOUT ({label}): script timed out under equivalent input perturbation.", {name: {"meta": pmeta, "status": "timeout"}}
         if res["returncode"] != 0:
             tail = (res["stderr"].strip().splitlines() or [""])[-1][:220]
-            return False, f"METAMORPHIC_CRASH ({name}): crashed under equivalent input perturbation: {tail}", {name: {"meta": pmeta, "status": "exception", "stderr": tail}}
+            return False, f"METAMORPHIC_CRASH ({label}): crashed under equivalent input perturbation: {tail}", {name: {"meta": pmeta, "status": "exception", "stderr": tail}}
         pert_val = parse_final_number(res["stdout"])
         if pert_val is None:
-            return False, f"METAMORPHIC_NO_NUMBER ({name}): did not print a valid number under perturbation.", {name: {"meta": pmeta, "status": "no_number"}}
+            return False, f"METAMORPHIC_NO_NUMBER ({label}): did not print a valid number under perturbation.", {name: {"meta": pmeta, "status": "no_number"}}
         consistent = matches(pert_val, orig_val, answer_type)
         details[name] = {"meta": pmeta, "orig": orig_val, "pert": pert_val, "consistent": consistent}
         if not consistent:
             ratio = (pert_val / orig_val) if abs(orig_val) > 1e-12 else float("inf")
-            mode = pmeta.get("mode", "")
+            mode = pmeta.get("mode", "") if isinstance(pmeta, dict) else ""
+            tag = f"{label}, {mode}" if include_domain_hint else label
+            caught_note = ""
+            if track_caught and res.get("caught_exceptions"):
+                caught_note = f" Caught/swallowed runtime exceptions during probe: {res['caught_exceptions'][:2]}."
             diag = (
-                f"METAMORPHIC_INCONSISTENCY ({name}, {mode}): "
+                f"METAMORPHIC_INCONSISTENCY ({tag}): "
                 f"original output={orig_val:.6g}, equivalent perturbed input output={pert_val:.6g} "
                 f"(ratio={ratio:.3g}x, >1% drift). "
-                "The output should remain invariant under this label-preserving input transformation."
+                f"The output should remain invariant under this label-preserving input transformation.{caught_note}"
             )
             if include_domain_hint:
                 if mode.startswith("tabular"):
@@ -131,11 +148,13 @@ def evaluate_harness(
     *,
     check_metamorphic: bool = False,
     include_domain_hint: bool = False,
+    custom_probes: list[tuple[str, object]] | None = None,
     use_oracle_in_loop: bool = False,
     track_caught: bool = False,
     compute_oracle: bool = True,
     skip_dev_exec: bool = False,
     max_llm_calls: int = 4,
+    max_exec_calls: int = 12,
     exec_timeout: float = 25.0,
     workers: int = 4,
     python: str = sys.executable,
@@ -159,6 +178,7 @@ def evaluate_harness(
             low_dir,
             llm_fn,
             max_llm_calls=max_llm_calls,
+            max_exec_calls=max_exec_calls,
             exec_timeout=exec_timeout,
             python=python,
         )
@@ -219,6 +239,8 @@ def evaluate_harness(
                     timeout=exec_timeout,
                     python=python,
                     include_domain_hint=include_domain_hint,
+                    custom_probes=custom_probes,
+                    track_caught=track_caught,
                 )
                 rec["meta_consistent"] = m_ok
                 rec["meta_diag"] = m_diag
