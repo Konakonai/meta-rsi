@@ -1,6 +1,7 @@
 """Publication-grade statistical analysis of multi-seed RSI evolution + unseen test eval."""
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from collections import defaultdict
@@ -17,9 +18,96 @@ def _ms(vals: list[float]) -> tuple[float, float]:
     return m, s
 
 
+def print_ood_report(ood_dir: Path, seeds: list[int], gates: list[str], gate_labels: dict[str, str]) -> None:
+    seed_p = ood_dir / "seed_e4b_nothink.json"
+    if not seed_p.exists():
+        return
+    seed_ev = json.loads(seed_p.read_text())
+    n_loc = seed_ev["ALL_LOCAL"]["n"]
+    n_sn = seed_ev["SEEN_LOCAL_16"]["n"]
+    n_ho = seed_ev["HELDOUT_3"]["n"]
+    print(f"\n=== POLAR OOD STRESS TEST (>84N / <80S, n={n_loc} local tasks: {n_sn} seen + {n_ho} held-out) ===")
+    print(
+        f"{'Exp':<20} | {'ALL_Corr':>8} {'Sn_Corr':>7} {'HO_Corr':>7} | "
+        f"{'Lucky':>7} {'SilW':>7} {'Error':>7} | {'Swallow':>8} {'Calls':>5}"
+    )
+    print("-" * 92)
+
+    def _fmt_sw(ev: dict) -> str:
+        sw = ev.get("swallowed_count")
+        n = max(ev["ALL_LOCAL"]["n"], 1)
+        return "    -   " if sw is None else f"{sw:3d}({sw/n*100:3.0f}%)"
+
+    s_all = seed_ev["ALL_LOCAL"]
+    print(
+        f"{'Gen-0 Seed':<20} | "
+        f"{s_all['correct']*100:7.1f}% {seed_ev['SEEN_LOCAL_16']['correct']*100:6.1f}% {seed_ev['HELDOUT_3']['correct']*100:6.1f}% | "
+        f"{s_all['lucky']*100:6.1f}% {s_all['silent_wrong']*100:6.1f}% {s_all['error']*100:6.1f}% | "
+        f"{_fmt_sw(seed_ev):>8} {seed_ev['avg_llm_calls']:5.2f}"
+    )
+
+    by_gate: dict[str, list[dict]] = defaultdict(list)
+    for g in gates:
+        for s in seeds:
+            exp = f"v3_gis_s{s}_{g}"
+            ev_p = ood_dir / f"{exp}.json"
+            if not ev_p.exists():
+                continue
+            ev = json.loads(ev_p.read_text())
+            a = ev["ALL_LOCAL"]
+            sw = ev.get("swallowed_count")
+            row = {
+                "seed": s,
+                "exp": exp,
+                "all_acc": a["correct"],
+                "seen_acc": ev["SEEN_LOCAL_16"]["correct"],
+                "ho_acc": ev["HELDOUT_3"]["correct"],
+                "lucky": a["lucky"],
+                "sw": a["silent_wrong"],
+                "err": a["error"],
+                "swallowed_rate": (sw / max(a["n"], 1)) if sw is not None else None,
+                "calls": ev["avg_llm_calls"],
+            }
+            by_gate[g].append(row)
+            print(
+                f"{exp:<20} | "
+                f"{row['all_acc']*100:7.1f}% {row['seen_acc']*100:6.1f}% {row['ho_acc']*100:6.1f}% | "
+                f"{row['lucky']*100:6.1f}% {row['sw']*100:6.1f}% {row['err']*100:6.1f}% | "
+                f"{_fmt_sw(ev):>8} {row['calls']:5.2f}"
+            )
+
+    print(f"\n=== POLAR OOD 4-SEED AGGREGATE (n={n_loc}, mean ± std) ===")
+    print(
+        f"{'Method':<22} {'N':>2} | {'ALL_Corr':>11} {'HO_Corr':>11} | "
+        f"{'Lucky':>11} {'SilW':>11} {'Error':>11} | {'Swallow%':>11}"
+    )
+    print("-" * 105)
+    for g in gates:
+        rows = by_gate[g]
+        if not rows:
+            continue
+        def fm(k):
+            m, s = _ms([r[k] for r in rows])
+            return f"{m*100:4.1f}±{s*100:4.1f}%"
+        sw_vals = [r["swallowed_rate"] for r in rows if r["swallowed_rate"] is not None]
+        if sw_vals:
+            sm, ss = _ms(sw_vals)
+            sw_s = f"{sm*100:4.1f}±{ss*100:4.1f}%"
+        else:
+            sw_s = "     -     "
+        print(
+            f"{gate_labels[g]:<22} {len(rows):>2} | "
+            f"{fm('all_acc'):>11} {fm('ho_acc'):>11} | "
+            f"{fm('lucky'):>11} {fm('sw'):>11} {fm('err'):>11} | {sw_s:>11}"
+        )
+
+
 def main() -> None:
-    import sys
-    eval_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("runs/eval150")
+    ap = argparse.ArgumentParser(description="Statistical analysis of multi-seed RSI evolution + unseen test / OOD eval")
+    ap.add_argument("eval_dir", nargs="?", default="runs/eval150", help="Directory with unseen test JSONs (default: runs/eval150)")
+    ap.add_argument("--ood-dir", default="", help="Optional directory with Polar OOD eval JSONs (e.g. runs/eval_ood)")
+    args = ap.parse_args()
+    eval_dir = Path(args.eval_dir)
     root = Path("runs")
     seeds = [0, 1, 2, 3]
     gates = ["naive", "preserve", "meta"]
@@ -175,6 +263,11 @@ def main() -> None:
                     f"  {name:<18}: pass@1={s['correct']*100:5.1f}%  lucky={s['lucky']*100:5.1f}%  "
                     f"silent_wrong={s['silent_wrong']*100:5.1f}%  error={s['error']*100:5.1f}%"
                 )
+
+    if args.ood_dir:
+        ood_path = Path(args.ood_dir)
+        if ood_path.exists():
+            print_ood_report(ood_path, seeds, gates, gate_labels)
 
 
 if __name__ == "__main__":

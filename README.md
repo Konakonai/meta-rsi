@@ -23,16 +23,17 @@ Long-term project documentation lives under `docs/`:
 
 - **Task LLM**: frozen `google/gemma-4-E4B-it` (`enable_thinking=False`, `temp=0.0`, max 4 calls/task)
 - **Meta LLM**: `gemini-4-hydrogen` (`thinking_level=low`, domain-neutral system prompt)
-- **Protocol**: 4 disjoint dev splits (36 tasks/seed = 2 per 18 seen families), 4 generations, evaluated on 150 unseen 3-location test tasks (90 seen + 60 held-out = 450 executions/harness).
+- **Protocol**: 4 disjoint dev splits (36 tasks/seed = 2 per 18 seen families), 4 generations, evaluated on the **full 480 unseen 3-location test set** (360 seen + 120 held-out = 1,440 executions/harness, apples-to-apples with all zero-shot baselines) plus the **full 440-task Polar OOD stress test** (`>84°N / <80°S`).
 
-| Method | Seeds | Dev `Low` (Weak) | Dev `Oracle` (3-loc) | Dev Gap | **Test ALL (`n=150`)** | **Test Seen (`n=90`)** | **Test Held-out (`n=60`)** | **Test `Lucky`** | Test `Err` | Calls | Lock-In (Gap ≥15%) |
+| Method | Seeds | Dev `Low` (Weak) | Dev `Oracle` (3-loc) | Dev Gap | **Test ALL (`n=480`)** | **Test Seen (`n=360`)** | **Test Held-out (`n=120`)** | **Test `Lucky`** | Test `Err` | Calls | Lock-In (Gap ≥15%) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Gen-0 Seed (`harnesses/seed.py`) | 1 | 45.8% | 17.6% | +28.2% | 28.0% | 24.4% | 33.3% | 31.3% | 17.3% | 1.00 | — |
-| `naive` (hill-climbing) | 4 | 84.7 ± 2.8% | 66.7 ± 24.3% | 18.1 ± 23.6% | 70.0 ± 23.6% | 67.5 ± 17.7% | 73.8 ± 32.6% | 20.3 ± 21.7% | 2.7 ± 1.2% | 1.26 | 1/4 |
-| `preserve` (DarwinX-style) | 4 | 75.7 ± 11.9% | 50.7 ± 21.9% | 25.0 ± 12.6% | 54.5 ± 20.9% | 52.5 ± 17.4% | 57.5 ± 26.6% | 23.8 ± 12.7% | 5.2 ± 1.9% | 1.27 | **3/4** |
-| **`metamorphic` (Ours)** | 4 | 80.6 ± 2.3% | **77.8 ± 3.9%** | **2.8 ± 5.6%** | **81.8 ± 3.3%** | **75.8 ± 3.1%** | **90.8 ± 7.4%** | **2.3 ± 2.5%** | 7.5 ± 2.6% | 1.47 | **0/4** |
+| Gen-0 Seed (`harnesses/seed.py`) | 1 | 45.8% | 17.6% | +28.2% | 24.2% | 23.1% | 27.5% | 31.2% | 18.1% | 1.00 | — |
+| `naive` (hill-climbing) | 4 | 84.7 ± 2.8% | 66.7 ± 24.3% | 18.1 ± 23.6% | 66.9 ± 22.7% | 64.7 ± 18.5% | 73.3 ± 35.7% | 18.6 ± 21.6% | 4.1 ± 1.7% | 1.30 | 1/4 |
+| `preserve` (DarwinX-style) | 4 | 75.7 ± 11.9% | 50.7 ± 21.9% | 25.0 ± 12.6% | 52.1 ± 22.4% | 51.0 ± 20.5% | 55.4 ± 29.1% | 24.6 ± 15.4% | 7.4 ± 2.9% | 1.26 | **3/4** |
+| **`metamorphic` (Ours)** | 4 | 80.6 ± 2.3% | **77.8 ± 3.9%** | **2.8 ± 5.6%** | **78.4 ± 3.8%** | **73.8 ± 4.9%** | **92.5 ± 5.1%** | **2.1 ± 1.8%** | 8.9 ± 3.0% | 1.50 | **0/4** |
 
-- Best evolved 4B no-think harness (`1.27` calls/task) reaches **86.7% ALL / 98.3% Held-out / 0.7% lucky**, outperforming zero-shot thinking `gemma-4-26B-A4B-it` (`71.7%`) and `Qwen3.8-27B` (`62.2%`).
+- Best evolved 4B no-think harness (`v3_gis_s2_meta`, `1.29` calls/task) reaches **81.9% ALL / 99.2% Held-out (119/120) / 1.0% lucky**, outperforming zero-shot thinking `gemma-4-26B-A4B-it` (`71.7%` ALL / `13.4%` lucky) by **+10.2%** and `Qwen3.8-27B` (`62.2%`) by **+19.7%** on the exact same 480 tasks.
+- On the **Polar OOD stress test** (`n=440` local tasks at `86.5°N / -85.5°S`, where `estimate_utm_crs()` raises `RuntimeError`), `metamorphic` fails **loudly** (`83.7%` Error, `2.7%` silent wrong) rather than returning silent distorted numbers (`Gen-0 Seed`: `65.9%` silent `Lucky+SilW`; `preserve`: `42.5%`), motivating self-discovered polar/AEQD operators in Phase P1 (full breakdown in [docs/RESEARCH.md](docs/RESEARCH.md)).
 
 ## Repository Layout
 
@@ -78,7 +79,7 @@ meta-rsi/
 │   ├── GSB_V1_BASELINE.md      # Complete GSB v1 zero-shot & silent-error report
 │   ├── INFRA_AND_GOTCHAS.md    # Compute inventory, budgets & Colab G4 runbook
 │   ├── gsb_v1_audit.log        # Method-separability audit log across all 21 families
-│   └── figures/                # Generated SVG plots (`fig_outcomes`, `fig_mercator`, `fig_rsi_gates`)
+│   └── figures/                # Generated SVG plots (`fig_outcomes`, `fig_mercator`, `fig_rsi_gates`, `fig_polar_ood`)
 ├── pyproject.toml              # Package metadata & pytest configuration
 └── shell.nix                   # Reproducible NixOS geospatial Python environment
 ```
@@ -117,17 +118,17 @@ python -m meta_rsi.evolve \
 ```bash
 python -m meta_rsi.eval.eval_test \
     --harness runs/my_meta_run/gen_004/harness.py \
-    --out runs/eval150/my_meta_run.json \
-    --task-no-think --seen-per-family 5 --heldout-per-family 20
+    --out runs/eval480/my_meta_run.json \
+    --task-no-think
 
 # Polar OOD stress test (>84N / <80S, disjoint from metamorphic targets, breaks estimate_utm_crs)
 python -m meta_rsi.eval.eval_ood \
     --harness runs/my_meta_run/gen_004/harness.py \
     --out runs/eval_ood/my_meta_run.json \
-    --task-no-think --track-caught
+    --task-no-think --seen-per-family 0 --heldout-per-family 0 --track-caught
 
 python -m meta_rsi.eval.stats runs/v3_gis_s*
-python -m meta_rsi.eval.analysis runs/eval150
+python -m meta_rsi.eval.analysis runs/eval480 --ood-dir runs/eval_ood
 
 # Regenerate SVG figures into docs/figures/
 nix-shell -p "python3.withPackages(ps:[ps.matplotlib ps.numpy])" --run "python scripts/plot_figures.py"

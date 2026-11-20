@@ -15,8 +15,10 @@
 ### Cloud GPU — Google Colab G4
 - **CLI**: `colab` authenticated via `oauth2`.
 - **Hardware (verified 2026-11-18)**: NVIDIA RTX PRO 6000 Blackwell Server Edition (**96 GB / 97,887 MiB VRAM**, bf16), 48 CPU cores, 176 GB RAM, 236 GB disk, PyTorch 2.14.1 + CUDA 13.0.
-- **Quota & Concurrency**: ~1,000 compute units/month at **10.05 CU/hr** (~99 hours/month). Account supports **2 concurrent G4 sessions** (`colab new -s <name> --gpu G4`).
-- **Cost Discipline**: Stop all sessions (`colab stop -s <name>`) immediately after runs; verify zero idle billing with `colab list`.
+- **Quota & Concurrency**: ~1,000 compute units/month at **10.05 CU/hr** (~99 hours/month). Account supports **2 concurrent G4 sessions** (`colab new -s g4-a --gpu G4` + `colab new -s g4-b --gpu G4`).
+  - **Default for batch experiments**: Always spin up **both G4 sessions** and shard multi-seed evolutions or multi-harness evaluations 50/50 across them — total CU cost is identical to serial execution while cutting wall-clock time in half.
+  - **Prefer on-VM execution for evaluations**: Upload a compact tarball (`benchmarks/`, `meta_rsi/`, harnesses, and needed `data/v1` task dirs — all 480 test tasks compress to ~7 MB) and run `eval_test` / `eval_ood` directly on each 48-core VM against `http://127.0.0.1:8000/v1` (2 concurrent eval processes × 24 workers per VM). This eliminates SSH tunnel RTT and the 60-minute WebSocket drop.
+- **Cost Discipline**: Stop all sessions (`colab stop -s <name>`) immediately after runs; verify zero idle billing with `colab sessions`.
 
 ### API & Cost-Control Architecture
 - **`gemini-api` CLI**: Uses local OS keyring authentication (`--meta-backend gemini-cli`); keys stay on the host.
@@ -40,6 +42,7 @@
 5. **Gemma 4 `vLLM` thinking switch & BF16 jitter**: `meta_rsi/llm.py` explicitly passes `chat_template_kwargs: {"enable_thinking": bool}`. Use `--task-temp 0.0` for evaluation; ~1–2% BF16 dynamic-batch jitter still occurs, so always run paired multi-seed experiments.
 6. **Code-fence extraction inside evolved harnesses**: Evolved `harness.py` files often contain literal ```` ```python ```` regexes; non-greedy regexes truncate early. `meta_rsi/meta_agent.py` uses line-anchored opening/closing fence matching.
 7. **Thinking-span stripping**: When evaluating thinking models (e.g., Qwen3.8, Gemma 4 thinking ON), strip everything before `</think>` or `<channel|>` so draft snippets inside reasoning traces are never scored as final code.
+8. **`colab exec` 30-second silence timeout**: `colab exec` disconnects locally if a remote script produces no stdout for 30s (the remote Jupyter kernel keeps running, though). Always pass `--timeout 1800` and emit a periodic heartbeat (`flush=True`) every ~15s in batch drivers; use `colab ls -s <name> <path>` (Contents API) to check remote output files without blocking behind a busy kernel.
 
 ---
 

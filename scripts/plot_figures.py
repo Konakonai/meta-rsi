@@ -144,13 +144,15 @@ def fig_rsi_gates(out_dir: Path, eval_dir: Path) -> bool:
         ("preserve\n(DarwinX)", "preserve"),
         ("metamorphic\n(Ours)", "meta"),
     ]
+    n_all = seed_ev["ALL"]["n"]
+    n_ho = seed_ev["HELDOUT_3"]["n"]
     metrics = [
-        ("ALL", "correct", "Test ALL (n=150)", "#2a78d6"),
-        ("HELDOUT_3", "correct", "Held-out (n=60)", "#008300"),
+        ("ALL", "correct", f"Test ALL (n={n_all})", "#2a78d6"),
+        ("HELDOUT_3", "correct", f"Held-out (n={n_ho})", "#008300"),
         ("ALL", "lucky", "Lucky hacks (↓)", "#eda100"),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(7.6, 2.5), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(8.2, 2.6), sharey=True)
     x = np.arange(len(methods))
     rng = np.random.default_rng(0)
 
@@ -169,11 +171,13 @@ def fig_rsi_gates(out_dir: Path, eval_dir: Path) -> bool:
             stds.append(float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0)
             raw_pts.append(vals)
 
-        bars = ax.bar(x, means, width=0.56, color=color, alpha=0.82, edgecolor="white", linewidth=0.8)
+        ax.bar(x, means, width=0.52, color=color, alpha=0.82, edgecolor="white", linewidth=0.8)
+        lo_err = [min(m, s) for m, s in zip(means[1:], stds[1:])]
+        hi_err = [min(100.0 - m, s) for m, s in zip(means[1:], stds[1:])]
         ax.errorbar(
             x[1:],
             means[1:],
-            yerr=stds[1:],
+            yerr=[lo_err, hi_err],
             fmt="none",
             ecolor=INK,
             elinewidth=1.0,
@@ -182,14 +186,17 @@ def fig_rsi_gates(out_dir: Path, eval_dir: Path) -> bool:
         )
         for xi, vals in zip(x, raw_pts):
             if len(vals) > 1:
-                jitter = rng.uniform(-0.12, 0.12, size=len(vals))
+                jitter = rng.uniform(-0.11, 0.11, size=len(vals))
                 ax.scatter(xi + jitter, vals, color=INK, s=14, zorder=5, alpha=0.85)
-        for xi, m in zip(x, means):
-            ax.text(xi, min(m + (stds[xi] if xi > 0 else 0) + 3.0, 102), f"{m:.1f}%", ha="center", va="bottom", fontsize=6.8)
+        for xi, (m, vals) in enumerate(zip(means, raw_pts)):
+            top_pt = max(vals) if vals else m
+            top_bar = min(100.0, m + (stds[xi] if xi > 0 else 0.0))
+            label_y = max(top_pt, top_bar) + 3.5
+            ax.text(xi, label_y, f"{m:.1f}%", ha="center", va="bottom", fontsize=6.8)
 
         ax.set_title(title, fontsize=8.5, pad=6)
-        ax.set_xticks(x, [m[0] for m in methods], fontsize=7.2)
-        ax.set_ylim(0, 112)
+        ax.set_xticks(x, [m[0] for m in methods], fontsize=6.8)
+        ax.set_ylim(0, 114)
         ax.set_yticks([0, 25, 50, 75, 100], ["0", "25", "50", "75", "100%"])
         ax.grid(axis="y", color=GRID, lw=0.6)
         ax.set_axisbelow(True)
@@ -205,20 +212,108 @@ def fig_rsi_gates(out_dir: Path, eval_dir: Path) -> bool:
     return True
 
 
+def fig_polar_ood(out_dir: Path, eval_dir: Path, ood_dir: Path) -> bool:
+    """Compare outcome distributions on Standard 480 Test vs Polar OOD (>84N / <80S, n=440)."""
+    seed_std = eval_dir / "seed_e4b_nothink.json"
+    seed_ood = ood_dir / "seed_e4b_nothink.json"
+    if not (seed_std.exists() and seed_ood.exists()):
+        return False
+
+    methods = [
+        ("Gen-0 Seed", None),
+        ("naive", "naive"),
+        ("preserve (DarwinX)", "preserve"),
+        ("metamorphic (Ours)", "meta"),
+    ]
+
+    def _agg(directory: Path, section: str) -> list[tuple[str, list[float]]]:
+        rows = []
+        for label, g in methods:
+            if g is None:
+                d = json.loads((directory / "seed_e4b_nothink.json").read_text())[section]
+                vals = [d["correct"], d["lucky"], d["silent_wrong"], d["error"]]
+            else:
+                mat = []
+                for s in range(4):
+                    p = directory / f"v3_gis_s{s}_{g}.json"
+                    if p.exists():
+                        d = json.loads(p.read_text())[section]
+                        mat.append([d["correct"], d["lucky"], d["silent_wrong"], d["error"]])
+                vals = list(np.mean(mat, axis=0))
+            rows.append((label, vals))
+        return rows
+
+    n_std = json.loads(seed_std.read_text())["ALL"]["n"]
+    n_ood = json.loads(seed_ood.read_text())["ALL_LOCAL"]["n"]
+    panels = [
+        (f"Standard Test (n={n_std}, ±64°)", _agg(eval_dir, "ALL")),
+        (f"Polar OOD (n={n_ood}, >84°N / <80°S)", _agg(ood_dir, "ALL_LOCAL")),
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(7.6, 2.45), sharey=True)
+    y = np.arange(len(methods))[::-1]
+
+    for ax, (title, rows) in zip(axes, panels):
+        for yi, (_, vals) in zip(y, rows):
+            left = 0.0
+            for k, v in enumerate(vals):
+                ax.barh(yi, v, left=left, height=0.58, color=COLORS[k], edgecolor="white", linewidth=1.0)
+                if v >= 0.08:
+                    ax.text(
+                        left + v / 2,
+                        yi,
+                        f"{round(v * 100)}",
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                        color=INK if k == 1 else "white",
+                    )
+                left += v
+        ax.set_title(title, fontsize=8.5, pad=6)
+        ax.set_yticks(y, [r[0] for r in rows])
+        ax.set_xlim(0, 1)
+        ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ["0", "25", "50", "75", "100%"])
+        ax.tick_params(length=0)
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+
+    fig.legend(
+        [plt.Rectangle((0, 0), 1, 1, color=c) for c in COLORS],
+        CATS,
+        ncol=4,
+        loc="upper center",
+        bbox_to_anchor=(0.54, 1.01),
+        frameon=False,
+        fontsize=6.8,
+        handlelength=0.9,
+        handleheight=0.9,
+        columnspacing=1.0,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.88), pad=0.5, w_pad=1.6)
+    fig.savefig(out_dir / "fig_polar_ood.svg")
+    plt.close(fig)
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate SVG figures for meta-rsi")
     ap.add_argument("--out", default="docs/figures")
     ap.add_argument("--zeroshot-dir", default="results/zero_shot_v1")
-    ap.add_argument("--eval-dir", default="runs/eval150")
+    ap.add_argument("--eval-dir", default="runs/eval480")
+    ap.add_argument("--ood-dir", default="runs/eval_ood")
     a = ap.parse_args()
 
     out_dir = Path(a.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    eval_dir = Path(a.eval_dir)
+    if not (eval_dir / "seed_e4b_nothink.json").exists() and Path("runs/eval150/seed_e4b_nothink.json").exists():
+        eval_dir = Path("runs/eval150")
     _style()
     fig_outcomes(out_dir, Path(a.zeroshot_dir))
     fig_mercator(out_dir)
-    ok_rsi = fig_rsi_gates(out_dir, Path(a.eval_dir))
-    print(f"Wrote figures to {out_dir} (fig_rsi_gates={'ok' if ok_rsi else 'skipped'})")
+    ok_rsi = fig_rsi_gates(out_dir, eval_dir)
+    ok_ood = fig_polar_ood(out_dir, eval_dir, Path(a.ood_dir))
+    print(f"Wrote figures to {out_dir} (fig_rsi_gates={'ok' if ok_rsi else 'skipped'}, fig_polar_ood={'ok' if ok_ood else 'skipped'})")
 
 
 if __name__ == "__main__":

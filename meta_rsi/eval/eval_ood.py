@@ -149,11 +149,14 @@ def main() -> None:
     by_fam: dict[str, Counter] = defaultdict(Counter)
     seen_cats, ho_cats = Counter(), Counter()
     swallowed_n = 0
+    swallowed_runnable_n = 0
     for r in records:
         c = r["category"]
         by_fam[r["family"]][c] += 1
         if r["swallowed"]:
             swallowed_n += 1
+            if c in ("correct", "lucky", "silent_wrong"):
+                swallowed_runnable_n += 1
         if r["family"] in train_fams:
             seen_cats[c] += 1
         else:
@@ -179,6 +182,7 @@ def main() -> None:
         "elapsed_s": elapsed,
         "avg_llm_calls": round(sum(r["llm_calls"] for r in records) / max(len(records), 1), 3),
         "swallowed_count": swallowed_n if a.track_caught else None,
+        "swallowed_runnable_count": swallowed_runnable_n if a.track_caught else None,
         "usage": llm.usage.to_dict(),
         "ALL_LOCAL": rates(all_cnt),
         "SEEN_LOCAL_16": rates(seen_cats),
