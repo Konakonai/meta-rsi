@@ -245,6 +245,8 @@ def evaluate_harness(
             "task_id": task["task_id"],
             "family": task["family"],
             "answer": task["answer"],
+            "prompt": task.get("prompt", ""),
+            "workspace_files": sorted(p.name for p in low_dir.iterdir() if p.is_file()) if low_dir.exists() else [],
             "llm_calls": run["llm_calls"],
             "elapsed_s": run["elapsed_s"],
             "harness_error": run["harness_error"],

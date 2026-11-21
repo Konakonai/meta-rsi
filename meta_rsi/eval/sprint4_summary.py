@@ -131,6 +131,8 @@ def _find_first(roots: list[Path], candidates: list[str]) -> Path | None:
 
 def summarize_gsb2(runs_dir: Path) -> dict:
     roots = [
+        runs_dir / "v7_s4_wave1c_g4b",
+        runs_dir / "v7_s4_wave1c_g4a",
         runs_dir / "v7_s4_wave1b_g4b",
         runs_dir / "v7_s4_wave1b_g4a",
         runs_dir / "v7_s4_wave1a_g4b",
@@ -143,7 +145,8 @@ def summarize_gsb2(runs_dir: Path) -> dict:
         "darwinx_soft": {},
         "llm_judge": {},
         "meta_T0": {},
-        "coev_v2": {},
+        "coev_tip_only": {},
+        "arch_coev": {},
     }
     for s in range(6):
         p_dx = _find_first(
@@ -159,14 +162,17 @@ def summarize_gsb2(runs_dir: Path) -> dict:
         p_t0 = _find_first(roots, [f"eval_v2_s{s}_meta_T0.json"] + (["eval450_stage1_meta_T0.json"] if s == 0 else []))
         if p_t0:
             methods["meta_T0"][s] = extract_metrics(p_t0)
-        cands_coev = (
+        cands_tip = (
             ["eval450_stage2_coev.json"]
             if s == 0
             else [f"eval_v2_s{s}_coev_v2.json", f"eval_v2_s{s}_coev.json"]
         )
-        p_cv = _find_first(roots, cands_coev)
-        if p_cv:
-            methods["coev_v2"][s] = extract_metrics(p_cv)
+        p_tip = _find_first(roots, cands_tip)
+        if p_tip:
+            methods["coev_tip_only"][s] = extract_metrics(p_tip)
+        p_arch = _find_first(roots, [f"eval_v2_s{s}_arch_coev.json"])
+        if p_arch:
+            methods["arch_coev"][s] = extract_metrics(p_arch)
 
     singles = {}
     for label, cands in [
@@ -215,27 +221,34 @@ def summarize_gsb2(runs_dir: Path) -> dict:
         }
 
     comparisons = {}
-    for base_m in ("darwinx_soft", "llm_judge", "meta_T0"):
-        shared = sorted(set(methods["coev_v2"]) & set(methods[base_m]))
+    primary = "arch_coev" if len(methods["arch_coev"]) >= 2 else "coev_tip_only"
+    for base_m in ("darwinx_soft", "llm_judge", "meta_T0", "coev_tip_only"):
+        if base_m == primary:
+            continue
+        shared = sorted(set(methods[primary]) & set(methods[base_m]))
         if len(shared) >= 2:
-            comparisons[f"coev_v2_vs_{base_m}"] = paired_tests(
-                [methods["coev_v2"][s]["all"] for s in shared],
+            comparisons[f"{primary}_vs_{base_m}"] = paired_tests(
+                [methods[primary][s]["all"] for s in shared],
                 [methods[base_m][s]["all"] for s in shared],
             )
-            comparisons[f"coev_v2_vs_{base_m}_ho"] = paired_tests(
-                [methods["coev_v2"][s]["ho"] for s in shared],
+            comparisons[f"{primary}_vs_{base_m}_ho"] = paired_tests(
+                [methods[primary][s]["ho"] for s in shared],
                 [methods[base_m][s]["ho"] for s in shared],
             )
 
-    # SciUnits 3-seed paired matrix
+    # SciUnits 3-seed paired matrix (prefer fixed v2 digest runs when present)
     sci_methods: dict[str, dict[int, dict]] = {"darwinx_soft": {}, "meta_soft": {}}
     for s in range(3):
-        for gm in ("darwinx_soft", "meta_soft"):
-            p = _find_first(roots, [f"eval_sci_s{s}_{gm}.json"])
-            if p:
-                sci_methods[gm][s] = extract_metrics(p)
-                if sci_methods[gm][s]["uerr"] > 0:
-                    bad_uerr.append((f"sci_{gm}:s{s}", sci_methods[gm][s]["uerr"], str(p)))
+        p_sd = _find_first(roots, [f"eval_sci_s{s}_darwinx_v2.json", f"eval_sci_s{s}_darwinx_soft.json"])
+        if p_sd:
+            sci_methods["darwinx_soft"][s] = extract_metrics(p_sd)
+            if sci_methods["darwinx_soft"][s]["uerr"] > 0:
+                bad_uerr.append((f"sci_darwinx_soft:s{s}", sci_methods["darwinx_soft"][s]["uerr"], str(p_sd)))
+        p_sm = _find_first(roots, [f"eval_sci_s{s}_meta_v2.json", f"eval_sci_s{s}_meta_soft.json"])
+        if p_sm:
+            sci_methods["meta_soft"][s] = extract_metrics(p_sm)
+            if sci_methods["meta_soft"][s]["uerr"] > 0:
+                bad_uerr.append((f"sci_meta_soft:s{s}", sci_methods["meta_soft"][s]["uerr"], str(p_sm)))
 
     sci_agg = {}
     for gm, smap in sci_methods.items():

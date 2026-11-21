@@ -184,6 +184,11 @@ def build_failure_digest(
             lines.append(
                 f"Numeric mismatch on dev: got={r['dev_low_value']}, expected={r['dev_low_truth']:.6g}"
             )
+        if r.get("workspace_files"):
+            lines.append(f"Workspace files: {', '.join(r['workspace_files'])}")
+        if r.get("prompt"):
+            p_txt = r["prompt"].strip().replace("\n", " ")
+            lines.append(f"Task prompt: {p_txt[:420]}")
         if r.get("dev_caught_exceptions"):
             lines.append(f"Swallowed exceptions at runtime: {r['dev_caught_exceptions'][:3]}")
         full_code = r.get("code") or ""
@@ -262,11 +267,24 @@ def _extract_fenced_blocks(text: str, required_def: str | None = None) -> str | 
 
 
 def _strip_thinking_preamble(text: str) -> str:
-    """Strip reasoning blocks ending in unquoted `</think>` or `<channel|>`, without splitting on string literals."""
+    """Strip reasoning blocks ending in unquoted `</think>` or `<channel|>`, never splitting inside code comments/literals."""
     clean = (text or "").lstrip()
     matches = list(re.finditer(r"(?<![\'\"\`])(?:</think>|<channel\|>)(?![\'\"\`])", clean))
-    if matches:
-        clean = clean[matches[-1].end() :].lstrip()
+    # Only accept a reasoning terminator if it is NOT on a Python comment line and is still followed by
+    # a fenced code block (when fences exist) so `# strip </think>` inside the final code block never chops imports.
+    has_fence = "```" in clean
+    valid_end = None
+    for m in matches:
+        line_start = clean.rfind("\n", 0, m.start()) + 1
+        line_prefix = clean[line_start : m.start()]
+        if "#" in line_prefix:
+            continue
+        suffix = clean[m.end() :]
+        if has_fence and not re.search(r"(?m)^\s*```(?:python|py)?\s*$", suffix):
+            continue
+        valid_end = m.end()
+    if valid_end is not None:
+        clean = clean[valid_end:].lstrip()
     return clean
 
 

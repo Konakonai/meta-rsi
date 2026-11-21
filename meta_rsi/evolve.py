@@ -82,6 +82,7 @@ def run_evolution(
     workers: int = 4,
     seed: int = 0,
     seed_harness_path: Path | None = None,
+    extra_seed_harnesses: list[Path] | None = None,
     eval_oracle_all: bool = False,
     limit_dev: int = 0,
     include_domain_hint: bool = False,
@@ -221,6 +222,69 @@ def run_evolution(
     archive.add(e0)
     eval_cache[0] = g0_dev
     archive.save()
+
+    # Optional Archive-Preserving Co-Evolution: re-score Stage-1 ancestors alongside gen_000 under T_{k+1}.
+    if extra_seed_harnesses:
+        base_src = g0_harness.read_text()
+        for a_idx, anc_src_path in enumerate(extra_seed_harnesses, 1):
+            anc_p = Path(anc_src_path)
+            if not anc_p.exists() or anc_p.read_text().strip() == base_src.strip():
+                continue
+            anc_gen = -a_idx
+            anc_dir = exp_dir / f"seed_anc_{a_idx:02d}"
+            anc_dir.mkdir(parents=True, exist_ok=True)
+            anc_harness = anc_dir / "harness.py"
+            shutil.copy2(anc_p, anc_harness)
+            ta = time.time()
+            anc_dev = evaluate_harness(
+                anc_harness,
+                dev_tasks,
+                data_root,
+                task_llm,
+                check_metamorphic=check_meta,
+                include_domain_hint=include_domain_hint,
+                custom_probes=custom_probes,
+                use_oracle_in_loop=use_oracle_gate,
+                judge_llm=active_judge,
+                track_caught=track_caught,
+                compute_oracle=True,
+                max_llm_calls=max_llm_calls,
+                max_exec_calls=max_exec_calls,
+                exec_timeout=exec_timeout,
+                workers=workers,
+            )
+            _save_eval(anc_dir / "dev_eval.json", anc_dev)
+            sa = anc_dev["summary"]
+            ea = ArchiveEntry(
+                gen=anc_gen,
+                parent_gen=0,
+                harness_path=str(anc_harness),
+                rationale=f"Stage-1 archive ancestor ({anc_p.name}) re-scored under upgraded verifier",
+                dev_low_rate=sa["dev_low_rate"],
+                in_loop_rate=sa["in_loop_rate"],
+                dev_error_rate=sa["dev_error_rate"],
+                avg_llm_calls=sa["avg_llm_calls"],
+                solved_ids=sa["solved_ids_in_loop"],
+                oracle_dev_rate=sa.get("oracle_correct_rate"),
+                oracle_dev_lucky=sa.get("oracle_lucky_rate"),
+            )
+            archive.add(ea)
+            eval_cache[anc_gen] = anc_dev
+            archive.save()
+            _print_row(
+                anc_gen,
+                0,
+                True,
+                ea.dev_low_rate,
+                ea.in_loop_rate,
+                ea.oracle_dev_rate,
+                None,
+                None,
+                ea.dev_error_rate,
+                ea.oracle_dev_lucky,
+                ea.avg_llm_calls,
+                f"stage1_anc ({time.time() - ta:.1f}s)",
+            )
 
     _print_row(
         0,

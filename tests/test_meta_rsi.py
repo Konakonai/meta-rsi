@@ -668,6 +668,28 @@ def test_extract_embedded_fences_in_multiline_string_and_smoke_import():
     assert "SYSTEM_PROMPT" in code
     assert "def solve(" in code
 
+    # Unquoted </think> or <channel|> inside a Python comment inside the final code block must NOT chop top imports!
+    raw_comment_think = (
+        "<|channel>thought\nDraft ```python\nx=1\n```\n<channel|>"
+        "HYPOTHESIS: Strip reasoning tags cleanly.\n"
+        "```python\n"
+        "from pathlib import Path\n"
+        "SYSTEM_PROMPT = 'Solve'\n"
+        "def extract_code(text):\n"
+        "    # Strip reasoning blocks ending in </think> or <channel|>\n"
+        "    return text\n"
+        "def solve(task_prompt: str, work_dir: Path, llm_call, run_python) -> dict:\n"
+        "    return {'code': extract_code(SYSTEM_PROMPT), 'trace': [], 'turns': 1}\n"
+        "```\n"
+    )
+    hyp_c, code_c = _extract_hypothesis_and_code(raw_comment_think)
+    assert "Strip reasoning tags" in hyp_c
+    assert code_c is not None
+    assert "from pathlib import Path" in code_c
+    assert "SYSTEM_PROMPT" in code_c
+    assert "def extract_code(" in code_c
+    assert "def solve(" in code_c
+
     # Smoke-import check in propose_mutation: first attempt omits Path (NameError), second succeeds.
     calls = {"n": 0}
     def flaky_meta(sys_p: str, usr_p: str) -> str:
