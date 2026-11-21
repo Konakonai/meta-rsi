@@ -53,7 +53,13 @@ def evaluate_gate(
     newly_solved = sorted(cand_solved - parent_solved)
     regressed = sorted(parent_solved - cand_solved)
     meta_blocked = sorted(
-        r["task_id"] for r in records if r["dev_low_ok"] and r["meta_checked"] and not r["meta_consistent"]
+        r["task_id"]
+        for r in records
+        if r["dev_low_ok"]
+        and (
+            (r.get("meta_checked") and not r.get("meta_consistent"))
+            or (r.get("judge_checked") and not r.get("judge_pass"))
+        )
     )
 
     if gate_mode == "naive":
@@ -72,11 +78,11 @@ def evaluate_gate(
             regressed=regressed,
         )
 
-    if gate_mode in ("darwinx_soft", "meta_soft", "meta_gate_only"):
+    if gate_mode in ("darwinx_soft", "meta_soft", "meta_gate_only", "llm_judge", "oracle_soft"):
         # True DarwinX-style soft bounded regression (arXiv:2608.07545 §2.1):
         # Accept iff net gain g(c) = |newly_solved| - |regressed| > 0 AND regression fraction R(c) <= delta.
-        # `meta_soft` / `meta_gate_only` apply the EXACT SAME rule on metamorphic-filtered `solved_ids_in_loop`,
-        # isolating the verifier signal with zero gating-formula confounder.
+        # `meta_soft` / `meta_gate_only` / `llm_judge` / `oracle_soft` apply the EXACT SAME rule on their
+        # respective filtered `solved_ids_in_loop`, isolating the verifier signal with zero gating confounder.
         n_tasks = max(int(s.get("n_tasks") or 1), 1)
         net_gain = len(newly_solved) - len(regressed)
         reg_frac = len(regressed) / n_tasks
@@ -84,6 +90,8 @@ def evaluate_gate(
             "darwinx_soft": "darwinx-soft",
             "meta_soft": "meta-soft",
             "meta_gate_only": "meta-gate-only",
+            "llm_judge": "llm-judge",
+            "oracle_soft": "oracle-soft",
         }[gate_mode]
         if net_gain > 0 and reg_frac <= soft_regress_delta + 1e-9:
             return GateDecision(

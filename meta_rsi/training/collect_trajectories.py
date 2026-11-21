@@ -24,6 +24,19 @@ from ..evaluator import _run_metamorphic_check
 from ..harnesses.seed import SYSTEM_PROMPT as SEED_SYSTEM_PROMPT
 from ..llm import LLMClient
 from ..sandbox import load_harness_module, parse_final_number, run_harness_on_workspace, run_python_sandbox
+from ..verifier_agent import load_probe_fn
+
+
+def load_probes_from_dir(probe_dir: Path | None, cache_dir: Path) -> list[tuple[str, object]] | None:
+    """Load certified `.py` probe modules from `probe_dir`, if provided."""
+    if probe_dir is None or not probe_dir.exists():
+        return None
+    probes: list[tuple[str, object]] = []
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for pfile in sorted(probe_dir.glob("*.py")):
+        pfn = load_probe_fn(pfile.read_text(), cache_dir, name=pfile.stem)
+        probes.append((pfile.stem, pfn))
+    return probes or None
 
 
 def select_train_slice(data_root: Path, *, train_offset: int = 20, train_per_family: int = 35) -> list[dict]:
@@ -45,6 +58,7 @@ def collect_trajectories(
     out_jsonl: Path,
     llm: LLMClient,
     filter_mode: str = "metamorphic",
+    custom_probes: list[tuple[str, object]] | None = None,
     train_offset: int = 20,
     train_per_family: int = 35,
     max_llm_calls: int = 4,
@@ -101,7 +115,13 @@ def collect_trajectories(
             return rec
 
         m_ok, _, _ = _run_metamorphic_check(
-            code, low_dir, val, task["answer"], timeout=exec_timeout, include_domain_hint=False
+            code,
+            low_dir,
+            val,
+            task["answer"],
+            timeout=exec_timeout,
+            include_domain_hint=False,
+            custom_probes=custom_probes,
         )
         rec["meta_ok"] = bool(m_ok)
         rec["kept"] = bool(m_ok)
@@ -175,6 +195,7 @@ def main() -> None:
     ap.add_argument("--data-root", default="data/v1")
     ap.add_argument("--out", required=True, help="Output JSONL path")
     ap.add_argument("--filter-mode", default="metamorphic", choices=["weak", "metamorphic"])
+    ap.add_argument("--probe-dir", default="", help="Optional dir of certified metamorphic probe .py files")
     ap.add_argument("--train-offset", type=int, default=20)
     ap.add_argument("--train-per-family", type=int, default=35)
     ap.add_argument("--task-backend", default="openai-compat", choices=["openai-compat", "mock"])
@@ -194,12 +215,18 @@ def main() -> None:
         max_tokens=a.task_max_tokens,
         enable_thinking=not a.task_no_think,
     )
+    probes = (
+        load_probes_from_dir(Path(a.probe_dir), Path(a.out).parent / "_probe_mods")
+        if a.probe_dir
+        else None
+    )
     summary = collect_trajectories(
         harness_path=Path(a.harness),
         data_root=Path(a.data_root),
         out_jsonl=Path(a.out),
         llm=llm,
         filter_mode=a.filter_mode,
+        custom_probes=probes,
         train_offset=a.train_offset,
         train_per_family=a.train_per_family,
         workers=a.workers,

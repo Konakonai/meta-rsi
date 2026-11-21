@@ -15,6 +15,7 @@ Strict anti-leakage guarantee:
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from collections import Counter, defaultdict
@@ -80,7 +81,11 @@ def _run_metamorphic_check(
     probe names are anonymized (`probe_1`, `probe_2`, ...) and internal transform mode names
     (`local_aeqd_shift`, `crs_storage_flip`, etc.) are NEVER revealed to the Meta-Agent.
     """
-    has_gpkg = any(p.suffix.lower() in {".gpkg", ".tif", ".tiff"} for p in src_dir.iterdir() if p.is_file())
+    has_gpkg = any(
+        p.suffix.lower() in {".gpkg", ".tif", ".tiff"} or p.name == "metadata.json"
+        for p in src_dir.iterdir()
+        if p.is_file()
+    )
     checks: list[tuple[str, dict | object]] = [
         ("shift_and_shuffle", dict(target_lat=58.3, target_lon=6.0, shuffle_rows=True, flip_gpkg_crs=False, seed=42))
     ]
@@ -140,6 +145,58 @@ def _run_metamorphic_check(
     return True, "consistent", details
 
 
+LLM_JUDGE_SYSTEM_PROMPT = (
+    "You are a strict scientific software verification reviewer auditing Python data-analysis scripts "
+    "that already produced a plausible numeric output on one validation input.\n"
+    "Determine whether the script implements a general, mathematically sound computation, or whether "
+    "it relies on fragile assumptions, distorted coordinate/unit approximations, hardcoded constants, "
+    "ignored file metadata/missing-value sentinels, or brittle dataset-specific shortcuts that could "
+    "silently fail on equivalent inputs.\n"
+    "Respond ONLY with a single JSON object: "
+    "{\"verdict\": \"PASS\" or \"FAIL\", \"reason\": \"<1 concise sentence>\"}"
+)
+
+
+def _run_llm_judge_check(
+    judge_llm: LLMClient,
+    task_prompt: str,
+    src_dir: Path,
+    code: str,
+) -> tuple[bool, str]:
+    """Static LLM-as-a-Judge rubric check (baseline alternative to execution-based metamorphic verification)."""
+    files = sorted(p.name for p in src_dir.iterdir() if p.is_file())
+    user_msg = (
+        f"## Task Prompt\n{task_prompt}\n\n"
+        f"## Workspace Files\n{', '.join(files)}\n\n"
+        f"## Candidate Python Script\n```python\n{code[:3500]}\n```\n\n"
+        "Judge whether this script is methodologically sound and free of silent-failure shortcuts. "
+        "Output ONLY valid JSON: {\"verdict\": \"PASS\"|\"FAIL\", \"reason\": \"...\"}"
+    )
+    resp = judge_llm.complete(LLM_JUDGE_SYSTEM_PROMPT, user_msg, temperature=0.0, max_tokens=256)
+    if resp.raw_error and not resp.text:
+        return True, f"LLM_JUDGE_ERROR_FALLBACK: {resp.raw_error[:120]}"
+    raw = (resp.text or "").strip()
+    for end in ("</think>", "<channel|>"):
+        if end in raw:
+            raw = raw.rsplit(end, 1)[1].strip()
+    m = re.search(r"\{.*\}", raw, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            verdict = str(obj.get("verdict", "")).strip().upper()
+            reason = str(obj.get("reason", "")).strip()[:240]
+            if verdict == "FAIL":
+                return False, f"LLM_JUDGE_REJECT: {reason or 'flagged fragile assumption or shortcut'}"
+            if verdict == "PASS":
+                return True, f"LLM_JUDGE_PASS: {reason or 'ok'}"
+        except json.JSONDecodeError:
+            pass
+    upper = raw.upper()
+    if "FAIL" in upper and "PASS" not in upper:
+        return False, f"LLM_JUDGE_REJECT: {raw[:200]}"
+    return True, f"LLM_JUDGE_PASS: {raw[:200]}"
+
+
 def evaluate_harness(
     harness_path: Path,
     tasks: list[dict],
@@ -150,6 +207,7 @@ def evaluate_harness(
     include_domain_hint: bool = False,
     custom_probes: list[tuple[str, object]] | None = None,
     use_oracle_in_loop: bool = False,
+    judge_llm: LLMClient | None = None,
     track_caught: bool = False,
     compute_oracle: bool = True,
     skip_dev_exec: bool = False,
@@ -200,6 +258,9 @@ def evaluate_harness(
             "meta_checked": False,
             "meta_consistent": False,
             "meta_diag": "",
+            "judge_checked": False,
+            "judge_pass": False,
+            "judge_diag": "",
             "in_loop_pass": False,
             "oracle_category": None,
             "oracle_correct": None,
@@ -245,6 +306,12 @@ def evaluate_harness(
                 rec["meta_consistent"] = m_ok
                 rec["meta_diag"] = m_diag
 
+            if judge_llm is not None and rec["dev_low_ok"] and code is not None:
+                rec["judge_checked"] = True
+                j_ok, j_diag = _run_llm_judge_check(judge_llm, task["prompt"], low_dir, code)
+                rec["judge_pass"] = j_ok
+                rec["judge_diag"] = j_diag
+
         if need_oracle:
             sc = gsb_score(task, code, data_root, timeout=exec_timeout, python=python)
             rec["oracle_category"] = sc["category"]
@@ -252,6 +319,8 @@ def evaluate_harness(
 
         if use_oracle_in_loop:
             rec["in_loop_pass"] = bool(rec["oracle_correct"])
+        elif judge_llm is not None:
+            rec["in_loop_pass"] = bool(rec["dev_low_ok"] and rec["judge_pass"])
         elif check_metamorphic:
             rec["in_loop_pass"] = bool(rec["dev_low_ok"] and rec["meta_consistent"])
         else:
@@ -269,6 +338,7 @@ def evaluate_harness(
     oracle_cats = Counter(r["oracle_category"] for r in records if r["oracle_category"] is not None)
     dev_low_pass_n = sum(1 for r in records if r["dev_low_ok"])
     meta_pass_n = sum(1 for r in records if r["dev_low_ok"] and r["meta_consistent"])
+    judge_pass_n = sum(1 for r in records if r["dev_low_ok"] and r["judge_pass"])
     in_loop_pass_n = sum(1 for r in records if r["in_loop_pass"])
     dev_err_n = sum(1 for r in records if r["dev_low_status"] != "ok")
     dev_ok_n = sum(1 for r in records if r["dev_low_status"] == "ok")
@@ -278,6 +348,7 @@ def evaluate_harness(
         "n_tasks": len(records),
         "dev_low_rate": round(dev_low_pass_n / n, 4),
         "meta_pass_rate": round(meta_pass_n / n, 4) if check_metamorphic else None,
+        "judge_pass_rate": round(judge_pass_n / n, 4) if judge_llm is not None else None,
         "in_loop_rate": round(in_loop_pass_n / n, 4),
         "dev_error_rate": round(dev_err_n / n, 4),
         "dev_swallowed_rate": round(dev_swallowed_n / max(dev_ok_n, 1), 4) if track_caught else None,

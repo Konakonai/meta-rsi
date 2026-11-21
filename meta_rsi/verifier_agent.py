@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import re
 import sys
 import tempfile
@@ -39,6 +40,7 @@ import pandas as pd
 from pyproj import CRS, Geod
 
 from .llm import LLMClient
+from .meta_agent import _extract_fenced_blocks, _stratified_pick, _strip_thinking_preamble
 from .sandbox import FORBIDDEN_CALLS, FORBIDDEN_IMPORTS, parse_final_number, run_python_sandbox
 
 _GEOD = Geod(ellps="WGS84")
@@ -57,7 +59,7 @@ this fragility WITHOUT changing the true task answer.
 
 Hard contract for your Python module:
 1. Must define: `def perturb(src_dir: Path, dst_dir: Path, seed: int = 42) -> dict`
-2. Allowed imports: stdlib (`pathlib`, `shutil`, `math`, `random`) plus `geopandas`, `pyproj`, `shapely`,
+2. Allowed imports: stdlib (`pathlib`, `shutil`, `math`, `random`, `json`, `csv`) plus `geopandas`, `pyproj`, `shapely`,
    `numpy`, `pandas`, `rasterio`.
 3. Must copy or transform ALL files from `src_dir` to `dst_dir` (creating `dst_dir` if needed), preserving
    exact filenames, layer/table counts, column names, row counts, and attribute value multisets.
@@ -245,6 +247,8 @@ def _raster_audit_stats(path: Path) -> dict:
         clon, clat = tr4326.transform(0.5 * (b.left + b.right), 0.5 * (b.bottom + b.top))
         aeqd = CRS.from_proj4(f"+proj=aeqd +lat_0={clat} +lon_0={clon} +datum=WGS84 +units=m +no_defs")
         tr_m, w_m, h_m = calculate_default_transform(orig_crs, aeqd, src.width, src.height, *b, resolution=50.0)
+        if w_m <= 0 or h_m <= 0 or (w_m * h_m) > 25_000_000:
+            raise ValueError(f"Invalid reprojected raster grid size: {w_m}x{h_m}")
         arr = np.full((h_m, w_m), np.float32(nodata), dtype=np.float32)
         reproject(
             source=rasterio.band(src, 1),
@@ -271,6 +275,110 @@ def _raster_audit_stats(path: Path) -> dict:
         "q50": float(np.median(vals)) if len(vals) else float("nan"),
         "n_valid": int(len(vals)),
     }
+
+
+_SI_SCALE_OFFSET: dict[str, tuple[float, float]] = {
+    "m": (1.0, 0.0), "km": (1000.0, 0.0), "cm": (0.01, 0.0), "mm": (0.001, 0.0), "ft": (0.3048, 0.0), "in": (0.0254, 0.0),
+    "m2": (1.0, 0.0), "cm2": (1e-4, 0.0), "ft2": (0.09290304, 0.0),
+    "m3": (1.0, 0.0), "L": (1e-3, 0.0), "ft3": (0.028316846592, 0.0), "gal_us": (0.003785411784, 0.0),
+    "kg": (1.0, 0.0), "g": (1e-3, 0.0), "t": (1000.0, 0.0), "lb": (0.45359237, 0.0),
+    "s": (1.0, 0.0), "min": (60.0, 0.0), "hr": (3600.0, 0.0),
+    "m/s": (1.0, 0.0), "km/h": (1.0 / 3.6, 0.0), "mph": (0.44704, 0.0), "ft/s": (0.3048, 0.0),
+    "K": (1.0, 0.0), "degC": (1.0, 273.15), "degF": (5.0 / 9.0, 273.15 - 32.0 * 5.0 / 9.0),
+    "Pa": (1.0, 0.0), "kPa": (1000.0, 0.0), "bar": (1e5, 0.0), "psi": (6894.757293168, 0.0),
+    "N": (1.0, 0.0), "kN": (1000.0, 0.0), "lbf": (4.4482216152605, 0.0),
+    "J": (1.0, 0.0), "kJ": (1000.0, 0.0), "MJ": (1e6, 0.0), "kWh": (3.6e6, 0.0), "kcal": (4184.0, 0.0),
+    "W": (1.0, 0.0), "kW": (1000.0, 0.0), "MW": (1e6, 0.0), "hp": (745.6998715822702, 0.0),
+    "W/m2": (1.0, 0.0), "kW/m2": (1000.0, 0.0),
+    "kg/m3": (1.0, 0.0), "g/cm3": (1000.0, 0.0), "lb/ft3": (16.01846337396014, 0.0),
+    "J/(kg*K)": (1.0, 0.0), "kJ/(kg*K)": (1000.0, 0.0),
+    "m4": (1.0, 0.0), "cm4": (1e-8, 0.0), "in4": (0.0254 ** 4, 0.0),
+    "rad": (1.0, 0.0), "deg": (float(np.pi / 180.0), 0.0),
+    "g/L": (1.0, 0.0), "mg/L": (1e-3, 0.0), "kg/L": (1000.0, 0.0),
+    "fraction": (1.0, 0.0), "percent": (0.01, 0.0),
+}
+
+
+def _audit_tabular_metadata_dir(src_dir: Path, dst_dir: Path, tol_rel: float) -> tuple[bool, str, bool]:
+    """Zero-label algebraic physical-value conservation audit for tabular+metadata workspaces."""
+    try:
+        m0 = json.loads((src_dir / "metadata.json").read_text())
+        m1 = json.loads((dst_dir / "metadata.json").read_text())
+    except Exception as exc:
+        return False, f"Invalid metadata.json: {exc}", False
+    t0 = m0.get("tables") or {}
+    t1 = m1.get("tables") or {}
+    if set(t0.keys()) != set(t1.keys()):
+        return False, f"metadata.json tables mismatch: {sorted(t0)} vs {sorted(t1)}", False
+
+    rep_changed = False
+    for fname in sorted(t0):
+        df0 = pd.read_csv(src_dir / fname)
+        df1 = pd.read_csv(dst_dir / fname)
+        if len(df0) != len(df1):
+            return False, f"Row count mismatch in {fname}: {len(df0)} vs {len(df1)}", False
+        req_cols = [c for c in df0.columns if not c.startswith("_meta_")]
+        missing_cols = [c for c in req_cols if c not in df1.columns]
+        if missing_cols:
+            return False, f"Missing columns in {fname}: {missing_cols}", False
+
+        tm0, tm1 = t0[fname], t1[fname]
+        if (
+            tm0.get("units") != tm1.get("units")
+            or tm0.get("calibration") != tm1.get("calibration")
+            or tm0.get("missing_sentinel") != tm1.get("missing_sentinel")
+            or list(df0.columns) != list(df1.columns)
+        ):
+            rep_changed = True
+
+        def _norm_df(df: pd.DataFrame, tm: dict) -> pd.DataFrame:
+            out = df.copy()
+            sent = tm.get("missing_sentinel")
+            if sent is not None:
+                for c in req_cols:
+                    if pd.api.types.is_numeric_dtype(out[c]):
+                        mask = np.isclose(out[c].to_numpy(dtype=float), float(sent), atol=1e-6, equal_nan=False)
+                        if np.any(mask):
+                            out.loc[mask, c] = np.nan
+            for c, cfg in (tm.get("calibration") or {}).items():
+                if c in out.columns:
+                    out[c] = out[c].astype(float) * float(cfg.get("scale", 1.0)) + float(cfg.get("offset", 0.0))
+            for c, u in (tm.get("units") or {}).items():
+                if c in out.columns:
+                    if u not in _SI_SCALE_OFFSET:
+                        raise ValueError(f"Unknown unit '{u}' in {fname}:{c}")
+                    sc, off = _SI_SCALE_OFFSET[u]
+                    out[c] = out[c].astype(float) * sc + off
+            return out
+
+        try:
+            n0 = _norm_df(df0, tm0)
+            n1 = _norm_df(df1, tm1)
+        except Exception as exc:
+            return False, f"Normalization error in {fname}: {exc}", False
+
+        for c in req_cols:
+            if pd.api.types.is_numeric_dtype(n0[c]):
+                v0 = np.sort(n0[c].dropna().to_numpy(dtype=float))
+                v1 = np.sort(n1[c].dropna().to_numpy(dtype=float))
+                if len(v0) != len(v1):
+                    return False, f"Non-missing count mismatch in {fname}:{c} ({len(v0)} vs {len(v1)})", False
+                if len(v0) > 0:
+                    # Allow constant time-origin shift on monotonic elapsed_time columns (dt-invariant)
+                    if "time" in c.lower():
+                        d0, d1 = np.diff(v0), np.diff(v1)
+                        denom = np.maximum(np.abs(d0), 1e-6)
+                        err = float(np.max(np.abs(d1 - d0) / denom)) if len(d0) else 0.0
+                    else:
+                        denom = np.maximum(np.abs(v0), 1e-6)
+                        err = float(np.max(np.abs(v1 - v0) / denom))
+                    if err > max(tol_rel, 1e-3):
+                        return False, f"Physical value drift {err:.4%} > {tol_rel:.2%} in {fname}:{c}", False
+            else:
+                if sorted(n0[c].astype(str).tolist()) != sorted(n1[c].astype(str).tolist()):
+                    return False, f"Categorical multiset mutated in {fname}:{c}", False
+
+    return True, "ok", rep_changed
 
 
 def _topo_counts(layers: dict[str, tuple[gpd.GeoDataFrame, CRS | None]]) -> dict[str, int]:
@@ -331,12 +439,12 @@ def certify_perturbation_operator(
 
         for idx, src_dir in enumerate(dev_dirs):
             dst_dir = tmp_path / f"audit_{idx}"
+            orig_files = sorted(p.name for p in src_dir.iterdir() if p.is_file())
             try:
                 probe_fn(src_dir, dst_dir, 42 + idx)
             except Exception as exc:
-                return {"certified": False, "stage": "exec", "reason": f"perturb() crashed on {src_dir.name}: {type(exc).__name__}: {exc}"}
+                return {"certified": False, "stage": "exec", "reason": f"perturb() crashed on workspace #{idx} (files={orig_files}): {type(exc).__name__}: {exc}"}
 
-            orig_files = sorted(p.name for p in src_dir.iterdir() if p.is_file())
             pert_files = sorted(p.name for p in dst_dir.iterdir() if p.is_file()) if dst_dir.exists() else []
             if orig_files != pert_files:
                 return {"certified": False, "stage": "schema", "reason": f"File list mismatch: {orig_files} vs {pert_files}"}
@@ -346,10 +454,20 @@ def certify_perturbation_operator(
             if set(orig_layers.keys()) != set(pert_layers.keys()):
                 return {"certified": False, "stage": "schema", "reason": "Spatial layer keys mismatch"}
 
+            ws_span_deg = 0.0
+            for g_o, _ in orig_layers.values():
+                if not g_o.empty:
+                    tb_o = g_o.total_bounds
+                    slon = float(tb_o[2] - tb_o[0])
+                    if slon > 180.0:
+                        slon = 360.0 - slon
+                    ws_span_deg = max(ws_span_deg, slon, float(tb_o[3] - tb_o[1]))
+            ws_tag = f"workspace #{idx} (span={ws_span_deg:.1f}deg, files={orig_files})"
+
             for fname, (g_orig, crs_orig) in orig_layers.items():
                 g_pert, crs_pert = pert_layers[fname]
                 if len(g_orig) != len(g_pert):
-                    return {"certified": False, "stage": "schema", "reason": f"Row count mismatch in {fname}"}
+                    return {"certified": False, "stage": "schema", "reason": f"Row count mismatch in {fname} on {ws_tag}"}
                 cols_o = sorted(c for c in g_orig.columns if c != "geometry")
                 cols_p = sorted(c for c in g_pert.columns if c != "geometry")
                 if cols_o != cols_p:
@@ -359,13 +477,13 @@ def certify_perturbation_operator(
                     ms_o = sorted(g_orig[cols_o].astype(str).agg("|".join, axis=1).tolist())
                     ms_p = sorted(g_pert[cols_o].astype(str).agg("|".join, axis=1).tolist())
                     if ms_o != ms_p:
-                        return {"certified": False, "stage": "schema", "reason": f"Attribute multiset mutated in {fname}"}
+                        return {"certified": False, "stage": "schema", "reason": f"Attribute multiset mutated in {fname} on {ws_tag}"}
                 # Bounds sanity
                 if g_pert.geometry.isna().any() or g_pert.geometry.is_empty.any():
-                    return {"certified": False, "stage": "geometry", "reason": f"Empty/NaN geometry in {fname}"}
+                    return {"certified": False, "stage": "geometry", "reason": f"Empty/NaN geometry in {fname} on {ws_tag}"}
                 tb = g_pert.total_bounds
                 if not np.all(np.isfinite(tb)) or tb[0] < -180.0 or tb[2] > 180.0 or tb[1] < -90.0 or tb[3] > 90.0:
-                    return {"certified": False, "stage": "geometry", "reason": f"Invalid WGS84 bounds {tb} in {fname}"}
+                    return {"certified": False, "stage": "geometry", "reason": f"Invalid WGS84 bounds {tb} in {fname} on {ws_tag}"}
 
                 if crs_orig != crs_pert:
                     crs_changed = True
@@ -383,12 +501,12 @@ def certify_perturbation_operator(
                     ae = abs(a1 - a0) / a0
                     max_area_err = max(max_area_err, ae)
                     if ae > tol_rel:
-                        return {"certified": False, "stage": "conservation", "reason": f"Geodesic area error {ae:.4%} > {tol_rel:.2%} in {fname}"}
+                        return {"certified": False, "stage": "conservation", "reason": f"Geodesic area error {ae:.4%} > {tol_rel:.2%} in {fname} on {ws_tag}"}
                 if l0 > 1.0:
                     le = abs(l1 - l0) / l0
                     max_len_err = max(max_len_err, le)
                     if le > tol_rel:
-                        return {"certified": False, "stage": "conservation", "reason": f"Geodesic length error {le:.4%} > {tol_rel:.2%} in {fname}"}
+                        return {"certified": False, "stage": "conservation", "reason": f"Geodesic length error {le:.4%} > {tol_rel:.2%} in {fname} on {ws_tag}"}
 
                 # Pairwise geodesic distance spectrum conservation
                 d0 = _pairwise_geod_spectrum(g_orig)
@@ -399,17 +517,19 @@ def certify_perturbation_operator(
                         de = float(np.max(np.abs(d1[mask] - d0[mask]) / d0[mask]))
                         max_dist_err = max(max_dist_err, de)
                         if de > max(tol_rel * 3.0, 3e-3):
-                            return {"certified": False, "stage": "conservation", "reason": f"Pairwise geodesic dist error {de:.4%} in {fname}"}
+                            return {"certified": False, "stage": "conservation", "reason": f"Pairwise geodesic dist error {de:.4%} in {fname} on {ws_tag}"}
 
             # Cross-layer topological conservation
             t0 = _topo_counts(orig_layers)
             t1 = _topo_counts(pert_layers)
             if t0 != t1:
                 topo_mismatches += 1
-                return {"certified": False, "stage": "topology", "reason": f"Topological counts changed on {src_dir.name}: {t0} vs {t1}"}
+                return {"certified": False, "stage": "topology", "reason": f"Topological counts changed on {ws_tag}: {t0} vs {t1}"}
 
             # GeoTIFF raster conservation (when rasters are present)
             orig_rasters = sorted(p for p in src_dir.iterdir() if p.is_file() and p.suffix.lower() in _RASTER_EXTS)
+            orig_vec_center = _circular_centroid_layers(orig_layers) if orig_layers else None
+            pert_vec_center = _circular_centroid_layers(pert_layers) if pert_layers else None
             for rp in orig_rasters:
                 pp = dst_dir / rp.name
                 try:
@@ -419,6 +539,15 @@ def certify_perturbation_operator(
                     return {"certified": False, "stage": "raster", "reason": f"Failed reading raster {rp.name}: {exc}"}
                 if rs1["n_valid"] == 0 or not np.isfinite(rs1["mean"]):
                     return {"certified": False, "stage": "raster", "reason": f"Perturbed raster {rp.name} has no valid pixels"}
+                if orig_vec_center is not None and pert_vec_center is not None:
+                    _, _, vr_d0 = _GEOD.inv(orig_vec_center[0], orig_vec_center[1], rs0["clon"], rs0["clat"])
+                    _, _, vr_d1 = _GEOD.inv(pert_vec_center[0], pert_vec_center[1], rs1["clon"], rs1["clat"])
+                    if abs(vr_d1 - vr_d0) > max(500.0, 0.10 * vr_d0):
+                        return {
+                            "certified": False,
+                            "stage": "conservation",
+                            "reason": f"Vector-raster spatial alignment broken for {rp.name}: center separation changed from {vr_d0:.0f}m to {vr_d1:.0f}m (transform rasters alongside vectors or copy raster workspaces verbatim).",
+                        }
                 if rs0["crs"] != rs1["crs"] or abs(rs0["nodata"] - rs1["nodata"]) > 1e-6:
                     crs_changed = True
                 _, _, rdisp = _GEOD.inv(rs0["clon"], rs0["clat"], rs1["clon"], rs1["clat"])
@@ -435,6 +564,14 @@ def certify_perturbation_operator(
                     rse = abs(rs1[stat_k] - rs0[stat_k]) / denom
                     if rse > r_tol:
                         return {"certified": False, "stage": "conservation", "reason": f"Raster {stat_k} drift {rse:.4%} > {r_tol:.2%} in {rp.name}"}
+
+            # Non-GIS scientific tabular + metadata.json physical conservation audit
+            if not orig_layers and not orig_rasters and (src_dir / "metadata.json").exists():
+                ok_tab, tab_reason, rep_changed = _audit_tabular_metadata_dir(src_dir, dst_dir, tol_rel)
+                if not ok_tab:
+                    return {"certified": False, "stage": "conservation", "reason": tab_reason}
+                if rep_changed:
+                    crs_changed = True
             audited_dirs += 1
 
         if max_disp_m < min_displacement_m and not crs_changed:
@@ -495,32 +632,16 @@ def certify_perturbation_operator(
 
 
 def _extract_hyp_and_code(text: str) -> tuple[str, str | None]:
-    raw = text or ""
-    fence_m = re.search(r"^\s*```(?:python|py)?\s*$", raw, re.M)
-    if fence_m:
-        preamble = raw[: fence_m.start()]
-        for end in ("</think>", "<channel|>"):
-            if end in preamble:
-                preamble = preamble.rsplit(end, 1)[1]
-        raw = preamble + raw[fence_m.start() :]
-    else:
-        for end in ("</think>", "<channel|>"):
-            if end in raw:
-                raw = raw.rsplit(end, 1)[1]
+    raw = _strip_thinking_preamble(text)
+    first_fence = raw.find("```")
+    prefix = raw[:first_fence] if first_fence != -1 else raw
+    if "HYPOTHESIS:" in prefix:
+        raw = raw[prefix.rfind("HYPOTHESIS:") :]
     hyp = ""
     m = re.search(r"HYPOTHESIS:\s*(.+?)(?=\n```|\Z)", raw, re.S)
     if m:
         hyp = m.group(1).strip()
-    lines = raw.splitlines()
-    start_idx, end_idx = None, None
-    for i, ln in enumerate(lines):
-        if start_idx is None and re.match(r"^\s*```(?:python|py)?\s*$", ln):
-            start_idx = i + 1
-        elif start_idx is not None and re.match(r"^\s*```\s*$", ln):
-            end_idx = i
-    if start_idx is not None and end_idx is not None and end_idx > start_idx:
-        return hyp, "\n".join(lines[start_idx:end_idx]).strip()
-    return hyp, None
+    return hyp, _extract_fenced_blocks(raw, required_def="perturb")
 
 
 def propose_and_certify_verifier(
@@ -528,10 +649,12 @@ def propose_and_certify_verifier(
     eval_result: dict,
     data_root: Path,
     *,
-    existing_probe_summary: str = "Mid-latitude local AEQD relocation to (58.3N, 6.0E) and (-56.2S, 12.0E) with GPKG CRS flip.",
-    max_attempts: int = 4,
-    audit_sample_n: int = 8,
-    disc_sample_n: int = 8,
+    existing_probe_summary: str = "Mid-latitude local AEQD relocation to (58.3N, 6.0E) and (-56.2S, 12.0E) with storage CRS flip.",
+    max_attempts: int = 5,
+    audit_sample_n: int = 10,
+    disc_sample_n: int = 12,
+    snippet_n: int = 6,
+    pick_seed: int = 0,
 ) -> dict:
     """Co-evolve a new zero-label certified invariance probe from currently passing solver traces."""
     records = eval_result["records"]
@@ -539,24 +662,47 @@ def propose_and_certify_verifier(
         r for r in records
         if r.get("in_loop_pass") and r.get("code") and r.get("dev_low_value") is not None
     ]
-    # Collect unlabeled local workspace dirs and passing scripts
+    # Audit conservation across ALL unlabeled dev modalities (local, raster, large-extent),
+    # while checking active discrimination strictly on currently passing solver scripts.
+    strat_all = _stratified_pick(records, max(audit_sample_n, 15), pick_seed)
+    strat_passing = _stratified_pick(passing, max(disc_sample_n, snippet_n), pick_seed)
     dev_dirs: list[Path] = []
     passing_cases: list[tuple[Path, str, float, str]] = []
     seen_fams = set()
-    for r in passing:
-        # Infer low dir from task_id under data_root
+    for r in strat_all + records:
         low_dir = data_root / r["task_id"] / "low"
         if not low_dir.exists():
             continue
         if r["family"] not in seen_fams and len(dev_dirs) < audit_sample_n:
             dev_dirs.append(low_dir)
             seen_fams.add(r["family"])
-        if len(passing_cases) < disc_sample_n:
-            passing_cases.append((low_dir, r["code"], float(r["dev_low_value"]), r["answer"]))
+    for r in strat_passing + passing:
+        low_dir = data_root / r["task_id"] / "low"
+        if not low_dir.exists():
+            continue
+        case = (low_dir, r["code"], float(r["dev_low_value"]), r["answer"])
+        if len(passing_cases) < disc_sample_n and all(c[0] != low_dir for c in passing_cases):
+            passing_cases.append(case)
 
+    snippet_recs = _stratified_pick(passing, snippet_n, pick_seed)
     snippets = []
-    for i, r in enumerate(passing[:5], 1):
-        snippets.append(f"### Passing Script {i}\n```python\n{(r['code'] or '')[:1000]}\n```")
+    for i, r in enumerate(snippet_recs, 1):
+        low_dir = data_root / r["task_id"] / "low"
+        fnames = sorted(p.name for p in low_dir.iterdir() if p.is_file()) if low_dir.exists() else []
+        full_code = r["code"] or ""
+        if len(full_code) > 2400:
+            code_disp = full_code[:2400] + f"\n# ... [display truncated; full script is {len(full_code)} chars]"
+        else:
+            code_disp = full_code
+        meta_preview = ""
+        meta_path = low_dir / "metadata.json"
+        if meta_path.exists():
+            try:
+                meta_txt = meta_path.read_text()[:500]
+                meta_preview = f"\nMetadata preview (`metadata.json`):\n```json\n{meta_txt}\n```\n"
+            except Exception:
+                meta_preview = ""
+        snippets.append(f"### Passing Script {i} (files: {', '.join(fnames)}){meta_preview}\n```python\n{code_disp}\n```")
 
     file_types = sorted({p.suffix.lower() for d in dev_dirs for p in d.iterdir() if p.is_file()})
     base_prompt = (
@@ -581,13 +727,23 @@ def propose_and_certify_verifier(
             continue
         hyp, code = _extract_hyp_and_code(resp.text)
         if not code:
-            feedback = "Missing ```python ... ``` block defining perturb(src_dir, dst_dir, seed=42)."
-            attempts.append({"attempt": attempt, "certified": False, "stage": "extract", "reason": feedback})
+            feedback = "Missing complete ```python ... ``` block defining perturb(src_dir, dst_dir, seed=42). Be concise and finish the full function inside a single fenced Python block."
+            attempts.append({
+                "attempt": attempt,
+                "certified": False,
+                "stage": "extract",
+                "reason": feedback,
+                "output_tokens": resp.output_tokens,
+                "raw_tail": (resp.text or "")[-300:],
+            })
             continue
         cert = certify_perturbation_operator(code, dev_dirs, passing_cases)
-        attempts.append({"attempt": attempt, "hypothesis": hyp, **cert})
+        entry = {"attempt": attempt, "hypothesis": hyp, "output_tokens": resp.output_tokens, **cert}
+        if cert.get("stage") == "ast":
+            entry["raw_tail"] = code[-300:]
+        attempts.append(entry)
         if cert["certified"]:
             return {"success": True, "hypothesis": hyp, "code": code, "audit": cert, "attempts": attempts}
-        feedback = f"Attempt {attempt} REJECTED at stage `{cert['stage']}`: {cert['reason']}. Fix this issue and ensure exact geodesic conservation + active failure exposure."
+        feedback = f"Attempt {attempt} REJECTED at stage `{cert['stage']}`: {cert['reason']}. Fix this issue and ensure exact physical/geometric conservation + active failure exposure."
 
     return {"success": False, "hypothesis": "", "code": None, "audit": None, "attempts": attempts}

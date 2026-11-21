@@ -87,6 +87,7 @@ def run_evolution(
     include_domain_hint: bool = False,
     minimal_meta_prompt: bool = False,
     custom_probes: list[tuple[str, object]] | None = None,
+    judge_llm: LLMClient | None = None,
     track_caught: bool = False,
 ) -> LineageArchive:
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -101,7 +102,8 @@ def run_evolution(
     test_seen = splits["test_seen"]
     test_heldout = splits["test_heldout"]
     check_meta = gate_mode in ("metamorphic", "meta_soft", "meta_gate_only")
-    use_oracle_gate = gate_mode == "oracle"
+    use_oracle_gate = gate_mode in ("oracle", "oracle_soft")
+    active_judge = (judge_llm or meta_llm) if gate_mode == "llm_judge" else None
     rng = random.Random(seed)
 
     config = {
@@ -163,6 +165,7 @@ def run_evolution(
         include_domain_hint=include_domain_hint,
         custom_probes=custom_probes,
         use_oracle_in_loop=use_oracle_gate,
+        judge_llm=active_judge,
         track_caught=track_caught,
         compute_oracle=True,
         max_llm_calls=max_llm_calls,
@@ -293,22 +296,36 @@ def run_evolution(
         diff = "".join(difflib.unified_diff(parent_lines, cand_lines, fromfile=f"gen_{parent.gen:03d}", tofile=f"gen_{gen:03d}"))
         (g_dir / "diff.patch").write_text(diff)
 
-        cand_dev = evaluate_harness(
-            cand_harness,
-            dev_tasks,
-            data_root,
-            task_llm,
-            check_metamorphic=check_meta,
-            include_domain_hint=include_domain_hint,
-            custom_probes=custom_probes,
-            use_oracle_in_loop=use_oracle_gate,
-            track_caught=track_caught,
-            compute_oracle=True,
-            max_llm_calls=max_llm_calls,
-            max_exec_calls=max_exec_calls,
-            exec_timeout=exec_timeout,
-            workers=workers,
-        )
+        try:
+            cand_dev = evaluate_harness(
+                cand_harness,
+                dev_tasks,
+                data_root,
+                task_llm,
+                check_metamorphic=check_meta,
+                include_domain_hint=include_domain_hint,
+                custom_probes=custom_probes,
+                use_oracle_in_loop=use_oracle_gate,
+                judge_llm=active_judge,
+                track_caught=track_caught,
+                compute_oracle=True,
+                max_llm_calls=max_llm_calls,
+                max_exec_calls=max_exec_calls,
+                exec_timeout=exec_timeout,
+                workers=workers,
+            )
+        except Exception as exc:
+            msg = f"harness_eval_failed: {type(exc).__name__}: {exc}"
+            archive.record_attempt({
+                "gen": gen,
+                "parent_gen": parent.gen,
+                "accepted": False,
+                "gate_reason": msg,
+                "rationale": rationale,
+            })
+            archive.save()
+            print(f"g{gen:02d}  g{parent.gen:02d}  ERROR   {msg}", flush=True)
+            continue
         _save_eval(g_dir / "dev_eval.json", cand_dev)
         decision = evaluate_gate(
             gate_mode,
@@ -372,6 +389,23 @@ def run_evolution(
             archive.add(entry)
             eval_cache[gen] = cand_dev
 
+        # Extract 1-line domain-neutral diagnostic summary for rejected-attempt memory (prevents repeating dead-end fixes).
+        top_diag = ""
+        if not decision.accepted:
+            recs = cand_dev.get("records") or []
+            for r in recs:
+                if gate_mode == "llm_judge" and r.get("judge_checked") and not r.get("judge_pass"):
+                    top_diag = (r.get("judge_diag") or "")[:240]
+                    break
+                if gate_mode in ("metamorphic", "meta_soft") and r.get("meta_checked") and not r.get("meta_consistent"):
+                    top_diag = (r.get("meta_diag") or "")[:240]
+                    break
+            if not top_diag:
+                for r in recs:
+                    if r.get("dev_low_status") != "ok" and r.get("dev_low_stderr"):
+                        top_diag = f"Error: {r['dev_low_stderr'][:220]}"
+                        break
+
         archive.record_attempt({
             "gen": gen,
             "parent_gen": parent.gen,
@@ -381,6 +415,7 @@ def run_evolution(
             "newly_solved": decision.newly_solved,
             "regressed": decision.regressed,
             "meta_blocked": decision.meta_blocked,
+            "top_diag": top_diag,
             "rationale": rationale,
         })
         archive.save()
@@ -443,7 +478,7 @@ def main() -> None:
     ap.add_argument(
         "--gate",
         default="metamorphic",
-        choices=["naive", "preserve", "darwinx_soft", "meta_soft", "meta_gate_only", "metamorphic", "oracle"],
+        choices=["naive", "preserve", "darwinx_soft", "llm_judge", "meta_soft", "meta_gate_only", "metamorphic", "oracle", "oracle_soft"],
     )
     ap.add_argument("--generations", type=int, default=6)
     ap.add_argument("--dev-per-family", type=int, default=1)
@@ -480,6 +515,10 @@ def main() -> None:
     ap.add_argument("--meta-max-tokens", type=int, default=16384)
     ap.add_argument("--meta-no-think", action="store_true")
     ap.add_argument("--meta-thinking-level", default="low", choices=["minimal", "low", "medium", "high"])
+    ap.add_argument("--judge-backend", default="", choices=["", "openai-compat", "gemini-cli", "gemini-rest", "mock"])
+    ap.add_argument("--judge-model", default="")
+    ap.add_argument("--judge-url", default="")
+    ap.add_argument("--judge-no-think", action="store_true")
     a = ap.parse_args()
 
     task_llm = LLMClient(
@@ -499,6 +538,16 @@ def main() -> None:
         enable_thinking=not a.meta_no_think,
         thinking_level=a.meta_thinking_level,
     )
+    judge_llm = None
+    if a.judge_backend:
+        judge_llm = LLMClient(
+            a.judge_backend,
+            a.judge_model or a.meta_model,
+            base_url=a.judge_url or a.meta_url,
+            temperature=0.0,
+            max_tokens=512,
+            enable_thinking=not a.judge_no_think,
+        )
     run_evolution(
         exp_dir=Path(a.runs_dir) / a.exp,
         data_root=Path(a.data_root),
@@ -524,6 +573,7 @@ def main() -> None:
         limit_dev=a.limit_dev,
         include_domain_hint=a.meta_domain_hints,
         minimal_meta_prompt=a.minimal_meta_prompt,
+        judge_llm=judge_llm,
         track_caught=a.track_caught_exceptions,
     )
 

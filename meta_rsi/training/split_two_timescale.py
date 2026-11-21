@@ -27,7 +27,7 @@ from benchmarks.gsb.harness import matches
 from ..evaluator import _run_metamorphic_check
 from ..harnesses.seed import SYSTEM_PROMPT as SEED_SYSTEM_PROMPT
 from ..sandbox import parse_final_number, run_python_sandbox
-from .collect_trajectories import select_train_slice
+from .collect_trajectories import load_probes_from_dir, select_train_slice
 from .lora_sync import push_lora_adapter
 
 
@@ -78,6 +78,7 @@ def score_completion(
     data_root: Path,
     *,
     reward_mode: str = "metamorphic",
+    custom_probes: list[tuple[str, object]] | None = None,
     timeout: float = 15.0,
 ) -> tuple[float, str, bool]:
     """Score a single completion on `low` only (`weak`) or `low` + label-free metamorphic invariance."""
@@ -99,7 +100,13 @@ def score_completion(
     if reward_mode == "weak":
         return 1.0, "low_ok", uses_3857
     m_ok, _, _ = _run_metamorphic_check(
-        code, low_dir, val, task["answer"], timeout=timeout, include_domain_hint=False
+        code,
+        low_dir,
+        val,
+        task["answer"],
+        timeout=timeout,
+        include_domain_hint=False,
+        custom_probes=custom_probes,
     )
     if m_ok:
         return 1.0, "meta_ok", uses_3857
@@ -337,6 +344,7 @@ def run_grpo_stage(
     initial_vllm_model: str,
     lora_prefix: str = "grpo_meta",
     reward_mode: str = "metamorphic",
+    custom_probes: list[tuple[str, object]] | None = None,
     train_offset: int = 20,
     train_per_family: int = 35,
     max_steps: int = 30,
@@ -409,7 +417,12 @@ def run_grpo_stage(
             scored = list(
                 ex.map(
                     lambda pair: score_completion(
-                        pair[1], pair[0], data_root, reward_mode=reward_mode, timeout=15.0
+                        pair[1],
+                        pair[0],
+                        data_root,
+                        reward_mode=reward_mode,
+                        custom_probes=custom_probes,
+                        timeout=20.0,
                     ),
                     flat_pairs,
                 )
@@ -585,6 +598,8 @@ def main() -> None:
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--max-seq-len", type=int, default=1536)
+    ap.add_argument("--max-completion-tokens", type=int, default=1024)
+    ap.add_argument("--probe-dir", default="", help="Optional dir of certified metamorphic probe .py files")
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
@@ -674,6 +689,11 @@ def main() -> None:
             print(f"[split-2ts] Loaded base + existing SFT adapter in {time.time() - t_load:.1f}s", flush=True)
 
         if a.mode in {"grpo", "sft_and_grpo"}:
+            probes = (
+                load_probes_from_dir(Path(a.probe_dir), out_dir / "_probe_mods")
+                if a.probe_dir
+                else None
+            )
             run_grpo_stage(
                 model,
                 tokenizer,
@@ -685,11 +705,13 @@ def main() -> None:
                 initial_vllm_model=a.sft_lora_name,
                 lora_prefix=a.grpo_prefix,
                 reward_mode=a.reward_mode,
+                custom_probes=probes,
                 train_offset=a.train_offset,
                 train_per_family=a.train_per_family,
                 max_steps=a.grpo_steps,
                 tasks_per_step=a.tasks_per_step,
                 num_generations=a.num_generations,
+                max_completion_tokens=a.max_completion_tokens,
                 max_seq_len=a.max_seq_len,
                 lr=a.grpo_lr,
                 beta=a.grpo_beta,

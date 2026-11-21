@@ -1,12 +1,15 @@
 """Meta-Agent proposer: inspects failure & metamorphic diagnostics and rewrites harness.py."""
 from __future__ import annotations
 
+import ast
+import inspect
 import re
+import tempfile
 from pathlib import Path
 
 from .archive import ArchiveEntry
 from .llm import LLMClient
-from .sandbox import validate_harness_source
+from .sandbox import load_harness_module, validate_harness_source
 
 META_SYSTEM_PROMPT = """You are an AI systems researcher evolving a self-contained Python Agent Harness (`harness.py`)
 that orchestrates a frozen LLM to solve verifiable Python data-analysis coding tasks reliably.
@@ -113,17 +116,21 @@ def build_failure_digest(
     ]
     if gate_mode in ("metamorphic", "meta_soft") and not hide_meta_diag and s["meta_pass_rate"] is not None:
         lines.append(f"- invariance-verified pass rate (dev_low AND invariance-consistent): {s['meta_pass_rate']:.1%}")
+    elif gate_mode == "llm_judge" and s.get("judge_pass_rate") is not None:
+        lines.append(f"- LLM-judge verified pass rate (dev_low AND judge PASS): {s['judge_pass_rate']:.1%}")
     elif gate_mode == "meta_gate_only" and s["meta_pass_rate"] is not None:
         lines.append(f"- verified in-loop pass rate: {s['in_loop_rate']:.1%}")
-    elif gate_mode == "oracle":
-        lines.append(f"- oracle 3-location pass rate (upper-bound verifier): {s['in_loop_rate']:.1%}")
+    elif gate_mode in ("oracle", "oracle_soft"):
+        lines.append(f"- oracle multi-variant pass rate (upper-bound verifier): {s['in_loop_rate']:.1%}")
     if s.get("dev_swallowed_rate") is not None:
         lines.append(f"- swallowed-exception rate among runnable scripts: {s['dev_swallowed_rate']:.1%}")
 
-    # Prioritize: (1) invariance/multi-location failures (unless hidden for pure gate-only ablation),
+    # Prioritize: (1) invariance/judge/multi-location failures (unless hidden for pure gate-only ablation),
     # (2) runtime crashes, (3) wrong numeric outputs — stratified across ALL families!
-    if gate_mode == "oracle":
+    if gate_mode in ("oracle", "oracle_soft"):
         meta_fails = [r for r in records if r["dev_low_ok"] and not r["oracle_correct"]]
+    elif gate_mode == "llm_judge":
+        meta_fails = [r for r in records if r["dev_low_ok"] and r.get("judge_checked") and not r.get("judge_pass")]
     elif hide_meta_diag or gate_mode == "meta_gate_only":
         meta_fails = []
     else:
@@ -138,7 +145,11 @@ def build_failure_digest(
         )
         picked = _stratified_pick(err_fails, 3, pick_seed) + _stratified_pick(wrong_fails, 3, pick_seed + 1)
     else:
-        fail_label = "oracle multi-location failures (lucky hacks)" if gate_mode == "oracle" else "invariance-inconsistency (silent drift)"
+        fail_label = (
+            "oracle multi-location failures (lucky hacks)"
+            if gate_mode in ("oracle", "oracle_soft")
+            else ("LLM-judge rubric rejections" if gate_mode == "llm_judge" else "invariance-inconsistency (silent drift)")
+        )
         lines.append(
             f"Breakdown of in-loop failures: {len(meta_fails)} {fail_label}, "
             f"{len(err_fails)} runtime/format errors, {len(wrong_fails)} wrong numeric answers on dev."
@@ -158,11 +169,13 @@ def build_failure_digest(
             lines.append(f"\n--- Failure Example {i} (status={r['dev_low_status']}) ---")
         else:
             lines.append(f"\n--- Failure Example {i} (family={r['family']}, status={r['dev_low_status']}) ---")
-        if gate_mode == "oracle" and r["dev_low_ok"] and not r["oracle_correct"]:
+        if gate_mode in ("oracle", "oracle_soft") and r["dev_low_ok"] and not r["oracle_correct"]:
             lines.append(
                 f"Diagnostic: Passed single-location dev_low, but failed multi-location oracle "
                 f"(category={r.get('oracle_category')})."
             )
+        elif gate_mode == "llm_judge" and r.get("judge_checked") and not r.get("judge_pass"):
+            lines.append(f"Diagnostic: {r.get('judge_diag', '')}")
         elif (not hide_meta_diag and gate_mode != "meta_gate_only") and r["meta_checked"] and not r["meta_consistent"]:
             lines.append(f"Diagnostic: {r['meta_diag']}")
         elif r["dev_low_status"] != "ok":
@@ -173,26 +186,95 @@ def build_failure_digest(
             )
         if r.get("dev_caught_exceptions"):
             lines.append(f"Swallowed exceptions at runtime: {r['dev_caught_exceptions'][:3]}")
-        snippet = (r.get("code") or "")[:900]
-        if snippet:
+        full_code = r.get("code") or ""
+        if full_code:
+            if len(full_code) > 2400:
+                snippet = full_code[:2400] + f"\n# ... [display truncated; full script is {len(full_code)} chars]"
+            else:
+                snippet = full_code
             lines.append(f"Emitted code snippet:\n```python\n{snippet}\n```")
 
     return "\n".join(lines)
 
 
-def _extract_hypothesis_and_code(text: str) -> tuple[str, str | None]:
-    # Strip ONLY a leading reasoning preamble before `HYPOTHESIS:` / first code fence.
-    # CRITICAL: Never `rsplit("<channel|>")` across the entire response, because `harness.py`
-    # itself contains `for end in ("</think>", "<channel|>"):` inside its own `extract_code()`!
+def _extract_fenced_blocks(text: str, required_def: str | None = None) -> str | None:
+    """Extract the target Python fenced code block robustly, handling BOTH:
+    1) Multiple fenced blocks in prose (e.g., an illustrative snippet before the full module), and
+    2) Embedded triple-backticks inside multiline string literals within a single Python module.
+    """
+    lines = text.splitlines()
+    open_indices: list[tuple[int, str]] = []
+    close_indices: list[int] = []
+
+    for i, ln in enumerate(lines):
+        m_open = re.match(r"^\s*```([a-zA-Z0-9_-]+)\s*$", ln)
+        m_bare = re.match(r"^\s*```\s*$", ln)
+        if m_open:
+            lang = m_open.group(1).lower()
+            if lang in ("python", "py"):
+                open_indices.append((i + 1, lang))
+        elif m_bare:
+            # A bare ``` line can act as either a closing fence or an untagged opening fence.
+            close_indices.append(i)
+            open_indices.append((i + 1, ""))
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for start_i, _ in open_indices:
+        for end_i in close_indices:
+            if end_i > start_i:
+                body = "\n".join(lines[start_i:end_i]).strip()
+                if body and body not in seen:
+                    seen.add(body)
+                    candidates.append(body)
+
+    if not candidates:
+        return None
+
+    def _has_valid_def(src: str, fn_name: str) -> bool:
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            return False
+        return any(isinstance(n, ast.FunctionDef) and n.name == fn_name for n in ast.walk(tree))
+
+    if required_def:
+        valid = [c for c in candidates if _has_valid_def(c, required_def)]
+        if valid:
+            # Prefer the longest AST-valid block defining `required_def` so a full module containing
+            # embedded ``` inside a multiline prompt string always beats an inner fragment!
+            return max(valid, key=len)
+        partial = [c for c in candidates if f"def {required_def}" in c]
+        if partial:
+            return max(partial, key=len)
+
+    # Fallback: longest syntactically valid Python block, else last candidate.
+    ast_valid = []
+    for c in candidates:
+        try:
+            ast.parse(c)
+            ast_valid.append(c)
+        except SyntaxError:
+            pass
+    if ast_valid:
+        return max(ast_valid, key=len)
+    return candidates[-1]
+
+
+def _strip_thinking_preamble(text: str) -> str:
+    """Strip reasoning blocks ending in unquoted `</think>` or `<channel|>`, without splitting on string literals."""
     clean = (text or "").lstrip()
-    first_fence = clean.find("```")
-    prefix = clean[:first_fence] if first_fence != -1 else clean
-    for end in ("</think>", "<channel|>"):
-        if end in prefix:
-            cut = prefix.rfind(end) + len(end)
-            clean = clean[cut:].lstrip()
-            break
-    # If a `thought\n...` preamble precedes `HYPOTHESIS:` before the first code fence, skip to `HYPOTHESIS:`.
+    matches = list(re.finditer(r"(?<![\'\"\`])(?:</think>|<channel\|>)(?![\'\"\`])", clean))
+    if matches:
+        clean = clean[matches[-1].end() :].lstrip()
+    return clean
+
+
+def _extract_hypothesis_and_code(text: str) -> tuple[str, str | None]:
+    # Strip ONLY an unquoted reasoning preamble ending with `</think>` or `<channel|>`, never
+    # splitting on quoted literals like `'<channel|>'` inside `harness.py`'s own `extract_code()`.
+    clean = _strip_thinking_preamble(text)
+    # Take the LAST `HYPOTHESIS:` before the first code fence so earlier scratch drafts never pollute rationale.
     first_fence = clean.find("```")
     prefix = clean[:first_fence] if first_fence != -1 else clean
     if "HYPOTHESIS:" in prefix:
@@ -202,24 +284,16 @@ def _extract_hypothesis_and_code(text: str) -> tuple[str, str | None]:
     m_hyp = re.search(r"HYPOTHESIS:\s*(.+?)(?=\n```|\n<<<HARNESS_CODE>>>|\Z)", clean, re.S)
     if m_hyp:
         hyp = m_hyp.group(1).strip()
+        if "HYPOTHESIS:" in hyp:
+            hyp = hyp.rsplit("HYPOTHESIS:", 1)[1].strip()
+        hyp = hyp[:600]
 
     # Prefer explicit sentinel markers if present.
     m_tag = re.search(r"<<<HARNESS_CODE>>>\s*\n(.*?)\n<<<END_HARNESS_CODE>>>", clean, re.S)
     if m_tag:
         return hyp, m_tag.group(1).strip()
 
-    # Robust line-anchored fenced block extraction: handles triple backticks inside Python string literals.
-    lines = clean.splitlines()
-    start_idx = None
-    end_idx = None
-    for i, ln in enumerate(lines):
-        if start_idx is None and re.match(r"^\s*```(?:python|py)?\s*$", ln):
-            start_idx = i + 1
-        elif start_idx is not None and re.match(r"^\s*```\s*$", ln):
-            end_idx = i
-    if start_idx is not None and end_idx is not None and end_idx > start_idx:
-        return hyp, "\n".join(lines[start_idx:end_idx]).strip()
-    return hyp, None
+    return hyp, _extract_fenced_blocks(clean, required_def="solve")
 
 
 def propose_mutation(
@@ -248,8 +322,9 @@ def propose_mutation(
     hist_lines = []
     for a in recent_attempts[-6:]:
         status = "ACCEPTED" if a["accepted"] else "REJECTED"
+        diag_part = f" | Observed failure: {a['top_diag']}" if (not a["accepted"] and a.get("top_diag") and not hide_meta_diag) else ""
         hist_lines.append(
-            f"- Gen {a['gen']} (from {a['parent_gen']}): {status} | {a['gate_reason']} | Hypothesis: {a['rationale'][:160]}"
+            f"- Gen {a['gen']} (from {a['parent_gen']}): {status} | {a['gate_reason']} | Hypothesis: {a['rationale'][:180]}{diag_part}"
         )
     history_block = "\n".join(hist_lines) if hist_lines else "(none yet — this is the first mutation)"
 
@@ -294,6 +369,36 @@ def propose_mutation(
         ok, reason = validate_harness_source(code)
         if not ok:
             last_err = f"AST validation failed: {reason}"
+            continue
+        # Smoke-import + mock-call contract check in an isolated temp dir to catch missing imports,
+        # top-level NameErrors, or broken `solve()` runtime bugs (e.g. UnboundLocalError / bad return dict).
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                tp = tmp_path / "cand_harness.py"
+                tp.write_text(code)
+                mod = load_harness_module(tp)
+                if "from __future__ import annotations" not in code:
+                    inspect.get_annotations(mod.solve, eval_str=True)
+                mock_wdir = tmp_path / "mock_ws"
+                mock_wdir.mkdir()
+                (mock_wdir / "sample.csv").write_text("x,y\n1,2\n")
+                smoke_res = mod.solve(
+                    "Compute a dummy number from sample.csv.",
+                    mock_wdir,
+                    lambda s, u: "```python\nprint(1)\n```",
+                    lambda c, d, timeout=25.0: {
+                        "returncode": 0,
+                        "stdout": "1\n",
+                        "stderr": "",
+                        "timed_out": False,
+                        "elapsed_s": 0.01,
+                    },
+                )
+                if not isinstance(smoke_res, dict) or "code" not in smoke_res:
+                    raise TypeError(f"solve() must return dict with 'code' key, got {type(smoke_res).__name__}")
+        except Exception as exc:
+            last_err = f"Harness smoke check failed: {type(exc).__name__}: {exc}"
             continue
         return hyp or "(no hypothesis provided)", code
 

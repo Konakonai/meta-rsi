@@ -117,6 +117,47 @@ Key takeaways:
 
 ---
 
+## 2.2 Verified v0.4 Results: GSB v2 Calibration, Leak-Free Multi-Round Verifier Co-Evolution, Real OSM Transfer & Non-GIS `SciUnits` (2026-11-21)
+
+All 16 evaluation JSONs (`runs/v6_gsb_v2_s3/`, `runs/v6_gsb_v2_s3b/`, `runs/v6_gsb_v2_s3b_stage2/`) passed strict auditing with **`usage.errors == 0`**.
+
+### 1. GSB v2 Benchmark (`data/v2`, 1,950 Tasks) & 4-Tier Separation (`n = 450`: 300 Seen + 150 Held-Out)
+- **Deterministic audit (`docs/gsb_v2_audit.log`)**: `reference_pass = 1,950/1,950 (100%)`, `utm_pass = 0/1,950`, `webmercator_pass = 0/1,710` on projection/raster/large families while `wm_low_pass = 95.1%` (CompV) and `93.0%` (Rast) under `|lat| <= 1.5°`, `naive_nodata_caught = 660/660 (100%)`.
+- **Single-seed 4-tier ladder on `data/v2` (`google/gemma-4-26B-A4B-it` no-think vs `E4B`)**:
+
+| Configuration | Model | **ALL (`n=450`)** | **Seen (`n=300`)** | **HO (`n=150`)** | **`Lucky`** | **`SilW`** | **`Err`** | Calls | `CompV` | `Rast` | `Large` | `Ctrl` |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Zero-shot `seed.py` | E4B | 11.3% | 13.7% | 6.7% | 21.3% | 38.7% | 28.7% | 1.00 | 2.8% | 5.6% | 14.3% | 67.5% |
+| Static `handcrafted.py` | E4B | 19.8% | 21.7% | 16.0% | 9.8% | 33.6% | 36.9% | 1.91 | 0.0% | 10.6% | 48.6% | 85.0% |
+| Zero-shot `seed.py` | **26B-A4B** | 30.7% | 33.0% | 26.0% | 44.4% | 14.2% | 10.7% | 1.00 | 2.2% | 31.9% | 65.7% | 92.5% |
+| Weak Verifier `darwinx_soft` (s0) | **26B-A4B** | 32.2% | 32.3% | 32.0% | **54.0%** | 10.0% | 3.8% | 1.21 | 1.1% | 35.6% | 65.7% | 97.5% |
+| Static `handcrafted.py` | **26B-A4B** | 35.1% | 40.7% | 24.0% | 11.3% | 4.0% | **49.6%** | 1.15 | 0.0% | 30.0% | 100.0% | 100.0% |
+| Fixed Mid-Lat `T_0` (`stage1_meta_T0`, s0) | **26B-A4B** | 22.9% | 27.3% | 14.0% | 4.9% | 17.1% | **55.1%** | 1.17 | 1.7% | 27.5% | 22.9% | 100.0% |
+| **Self-Certified Co-Ev (`stage2_coev`, s0)** | **26B-A4B** | **62.9%** | **64.3%** | **60.0%** | 12.7% | 22.7% | **1.8%** | **1.18** | **82.8%** | **54.4%** | 12.9% | 95.0% |
+
+- **2nd-order Proxy Lock-In exposed**: Fixed mid-latitude `T_0` solved 1st-order `EPSG:3857` lock-in (`InLoop(T_0) = 73.3%`, `Lucky: 44.4% → 4.9%`), but converged to `gdf.estimate_utm_crs()` and hit the exact same polar/antimeridian wall (`Err = 55.1%`, `CompV = 1.7%`) as static `handcrafted.py` (`Err = 49.6%`).
+- **Strictly Hint-Free Multi-Round Verifier Discovery**: After stripping all failure-mode keywords from `VERIFIER_SYSTEM_PROMPT` (unit-tested) and adding vector–raster co-location conservation checks:
+  - `gemini-4-hydrogen` (`thinking_level=low`) autonomously discovered and certified **3 orthogonal probes** passing 15/15 GSB v2 dev families: (1) **Polar `86°N` LAEA** co-located vector+raster relocation (`caught=8/12`, `max_len_err=0.00087%`, `max_dist_err=0.0225%`), (2) **Web Mercator `EPSG:3857` projected GPKG** exposing `if crs.is_geographic:` bypass (`0.00000%` error), and (3) **Non-meter projected CRS (`+units=km`)** on both `.gpkg` and `.tif` (`0.00000%` error).
+  - 100% open-weight `26B-A4B` (`enable_thinking=False`) also self-certified a cross-layer CRS-mismatch probe on Attempt 1 (`out_tok=1,578`, `0.00000%` error across 10/10 workspaces, `caught=1/12`), whereas `enable_thinking=True` without a token budget hit 8,192-token thinking truncation on 6/6 attempts.
+- **Stage-2 Co-Evolution**: Adding the 3 self-certified probes immediately closed the `43.3 pp` verifier–oracle gap (`InLoop` dropped `73.3% → 26.7%`, matching `OraDev = 26.7%`) and lifted `eval450` by **`+40.0 pp`** (`22.9% → 62.9%`, `HO: 14.0% → 60.0%`, `CompV: 1.7% → 82.8%`, `Rast: 27.5% → 54.4%`, `Err: 55.1% → 1.8%`).
+
+### 2. Zero-Shot Real OpenStreetMap 4-Latitude Urban Transfer (`data/osm_eval/`, `n = 24`)
+Fetched directly from the live OpenStreetMap v0.6 API across 4 real cities spanning `1.29°N` to `69.65°N` (Web Mercator area distortion `1.007x → 1.468x → 4.028x → 8.226x`):
+
+| Evolved Harness (Trained Only on Synthetic GSB v2) | **ALL (`n=24`)** | Singapore (`1.29°N`) | Xuzhou (`34.26°N`) | Helsinki (`60.17°N`) | Tromsø (`69.65°N`) | `SilW` | `Err` | Calls |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Zero-shot `seed.py` | 41.7% | 5/6 | 3/6 | 1/6 | 1/6 | 41.7% | 16.7% | 1.00 |
+| Weak Verifier `darwinx_soft` | **29.2%** | **6/6** | 1/6 | **0/6** | **0/6** | **70.8%** | 0.0% | 1.29 |
+| Fixed Mid-Lat `T_0` (`stage1_T0`) | 95.8% | 5/6 | 6/6 | 6/6 | 6/6 | 4.2% | 0.0% | 1.29 |
+| **Self-Certified Co-Ev (`stage2_coev`)** | **100.0%** | **6/6** | **6/6** | **6/6** | **6/6** | **0.0%** | **0.0%** | **1.17** |
+
+### 3. Non-GIS Scientific Benchmark Calibration (`benchmarks/sci_units/`, `data/sci_v1`, 760 Tasks)
+- 12 scientific/engineering tabular+`metadata.json` families (8 seen + 4 held-out) auditing physical unit conversions, ADC calibration `(scale, offset)`, missing-value sentinels (`-999/-9999`), and row/column permutations (`ref_pass = 760/760`, `naive_low_pass = 760/760`, `naive_all_pass = 0/760`).
+- Zero-shot `26B-A4B` `seed.py` (`n=280` unseen test): **`ALL = 7.1%` (`HO = 0.0%`, `Lucky = 45.4%`, `Err = 18.2%`)**.
+- Weak verifier `darwinx_soft` (5 gens): `DevLow/InLoop` climbed monotonically `68.8% → 87.5%` (`Dev Lucky: 56.2% → 75.0%`) while `OraDev` remained frozen at `12.5%` and unseen test stalled at **`ALL = 7.1%` (`HO = 0.0%`, `Lucky = 44.6%`, `SilW = 47.9%`)** — reproducing Proxy Lock-In identically outside GIS. (Thinking Meta-Agent `meta_neutral` vs `darwinx_soft` 3-seed comparison queued in Sprint 4 Wave 1B.)
+
+---
+
 ## 3. Open Methodological Risks & Mitigation Tracker
 
 | ID | Risk / Reviewer Critique | Current Status | Concrete Mitigation |

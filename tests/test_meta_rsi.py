@@ -533,3 +533,208 @@ def test_extract_hypothesis_preserves_channel_tag_in_code():
     assert "'<channel|>'" in code
     assert "def solve(" in code
 
+
+def test_extract_handles_multiple_fenced_blocks():
+    """When a response includes an example snippet before the target function block, extract the valid target block."""
+    from meta_rsi.meta_agent import _extract_hypothesis_and_code
+    from meta_rsi.verifier_agent import _extract_hyp_and_code
+
+    raw_v = (
+        "thought\nLet's inspect the failing line:\n```python\ng = g.to_crs('EPSG:3857')\n```\n"
+        "<channel|>"
+        "HYPOTHESIS: Test an invariant coordinate transform.\n"
+        "Example snippet from solver:\n"
+        "```python\nx = 1 + 1\n```\n"
+        "Full operator:\n"
+        "```python\nfrom pathlib import Path\n\ndef perturb(src_dir: Path, dst_dir: Path, seed: int = 42) -> dict:\n    return {'mode': 'test'}\n```\n"
+    )
+    hyp_v, code_v = _extract_hyp_and_code(raw_v)
+    assert "invariant coordinate transform" in hyp_v
+    assert code_v is not None and "def perturb(" in code_v and "x = 1 + 1" not in code_v
+
+    raw_m = (
+        "HYPOTHESIS: Add repair loop.\n"
+        "Note this snippet:\n```python\ny = 2\n```\n"
+        "```python\ndef solve(task_prompt, work_dir, llm_call, run_python):\n    return {'code': None, 'trace': [], 'turns': 0}\n```\n"
+    )
+    hyp_m, code_m = _extract_hypothesis_and_code(raw_m)
+    assert "Add repair loop" in hyp_m
+    assert code_m is not None and "def solve(" in code_m and "y = 2" not in code_m
+
+
+def test_llm_judge_gate_blocks_shortcut_and_formats_digest():
+    """Verify --gate llm_judge rejects judge-flagged scripts and feeds rubric reason into failure digest."""
+    from meta_rsi.evaluator import _run_llm_judge_check
+    from meta_rsi.meta_agent import build_failure_digest
+
+    def mock_judge(system: str, user: str) -> str:
+        if "EPSG:3857" in user:
+            return '{"verdict": "FAIL", "reason": "Uses Web Mercator EPSG:3857 for area calculation."}'
+        return '{"verdict": "PASS", "reason": "Uses dynamic local projection."}'
+
+    j_llm = LLMClient("mock", "mock-judge", mock_fn=mock_judge)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "parcels.geojson").write_text("{}")
+        ok_bad, diag_bad = _run_llm_judge_check(j_llm, "Compute area", d, "g = g.to_crs('EPSG:3857')")
+        ok_good, diag_good = _run_llm_judge_check(j_llm, "Compute area", d, "g = g.to_crs(aeqd)")
+        assert not ok_bad and "EPSG:3857" in diag_bad
+        assert ok_good
+
+    parent = ArchiveEntry(
+        gen=0,
+        parent_gen=None,
+        harness_path="gen_000/harness.py",
+        rationale="seed",
+        dev_low_rate=0.5,
+        in_loop_rate=0.0,
+        dev_error_rate=0.0,
+        avg_llm_calls=1.0,
+        solved_ids=[],
+    )
+    cand_eval = {
+        "summary": {
+            "n_tasks": 2,
+            "dev_low_rate": 1.0,
+            "meta_pass_rate": None,
+            "judge_pass_rate": 0.5,
+            "in_loop_rate": 0.5,
+            "dev_error_rate": 0.0,
+            "avg_llm_calls": 1.0,
+            "solved_ids_in_loop": ["t1"],
+        },
+        "records": [
+            {
+                "task_id": "t1",
+                "family": "f1",
+                "dev_low_status": "ok",
+                "dev_low_ok": True,
+                "dev_low_value": 10.0,
+                "dev_low_truth": 10.0,
+                "meta_checked": False,
+                "meta_consistent": False,
+                "meta_diag": "",
+                "judge_checked": True,
+                "judge_pass": True,
+                "judge_diag": "LLM_JUDGE_PASS: ok",
+                "code": "print(10.0)",
+            },
+            {
+                "task_id": "t2",
+                "family": "f2",
+                "dev_low_status": "ok",
+                "dev_low_ok": True,
+                "dev_low_value": 20.0,
+                "dev_low_truth": 20.0,
+                "meta_checked": False,
+                "meta_consistent": False,
+                "meta_diag": "",
+                "judge_checked": True,
+                "judge_pass": False,
+                "judge_diag": "LLM_JUDGE_REJECT: Uses EPSG:3857 shortcut.",
+                "code": "g = g.to_crs('EPSG:3857')",
+            },
+        ],
+    }
+    dec = evaluate_gate("llm_judge", parent, cand_eval, soft_regress_delta=0.14)
+    assert dec.accepted and dec.meta_blocked == ["t2"]
+    digest = build_failure_digest(cand_eval, "llm_judge", minimal_prompt=True)
+    assert "LLM_JUDGE_REJECT" in digest and "EPSG:3857" in digest
+
+
+def test_extract_embedded_fences_in_multiline_string_and_smoke_import():
+    """Embedded ``` lines inside a harness's multiline SYSTEM_PROMPT must not chop off top imports,
+    and propose_mutation() must catch missing imports (NameError) before evaluation."""
+    from meta_rsi.meta_agent import _extract_hypothesis_and_code, propose_mutation
+
+    raw = (
+        "thought\nI will include an example inside SYSTEM_PROMPT.\n<channel|>"
+        "HYPOTHESIS: Preserve full module despite embedded fences.\n"
+        "```python\n"
+        "from pathlib import Path\n\n"
+        'SYSTEM_PROMPT = """Return code inside:\n'
+        "```python\n"
+        "print(42)\n"
+        "```\n"
+        '"""\n\n'
+        "def solve(task_prompt: str, work_dir: Path, llm_call, run_python) -> dict:\n"
+        "    return {'code': None, 'trace': [], 'turns': 0}\n"
+        "```\n"
+    )
+    hyp, code = _extract_hypothesis_and_code(raw)
+    assert "Preserve full module" in hyp
+    assert code is not None
+    assert "from pathlib import Path" in code
+    assert "SYSTEM_PROMPT" in code
+    assert "def solve(" in code
+
+    # Smoke-import check in propose_mutation: first attempt omits Path (NameError), second succeeds.
+    calls = {"n": 0}
+    def flaky_meta(sys_p: str, usr_p: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return (
+                "HYPOTHESIS: broken import\n```python\n"
+                "def solve(task_prompt: str, work_dir: Path, llm_call, run_python) -> dict:\n"
+                "    return {'code': None, 'trace': [], 'turns': 0}\n```\n"
+            )
+        assert "NameError" in usr_p
+        return (
+            "HYPOTHESIS: fixed import\n```python\nfrom pathlib import Path\n"
+            "def solve(task_prompt: str, work_dir: Path, llm_call, run_python) -> dict:\n"
+            "    return {'code': None, 'trace': [], 'turns': 0}\n```\n"
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        seed_p = Path(tmp) / "seed.py"
+        seed_p.write_text("from pathlib import Path\ndef solve(a, b, c, d): return {'code': None, 'trace': [], 'turns': 0}\n")
+        parent = ArchiveEntry(0, None, str(seed_p), "seed", 0.5, 0.5, 0.0, 1.0, [])
+        ev = {
+            "summary": {"n_tasks": 1, "dev_low_rate": 0.5, "meta_pass_rate": 0.5, "in_loop_rate": 0.5, "dev_error_rate": 0.0, "avg_llm_calls": 1.0},
+            "records": [],
+        }
+        hyp2, code2 = propose_mutation(LLMClient("mock", "m", mock_fn=flaky_meta), parent, ev, [], "meta_soft")
+        assert calls["n"] == 2
+        assert "from pathlib import Path" in code2
+
+
+def test_geoanalyst_audit_and_probe_loader(tmp_path):
+    """GeoAnalystBench static geospatial soundness audit and probe-dir loader work as expected."""
+    from meta_rsi.eval.geoanalyst_eval import audit_geo_script
+    from meta_rsi.training.collect_trajectories import load_probes_from_dir
+
+    vec_task = {"needs_raster": False, "needs_vector_metric": True}
+    rast_task = {"needs_raster": True, "needs_vector_metric": False}
+
+    # Distorted EPSG:3857 should fail
+    bad_wm = "import geopandas as gpd\ng = gpd.read_file('a.geojson').to_crs('EPSG:3857')\nprint(g.geometry.area.sum())\n"
+    a_wm = audit_geo_script(bad_wm, vec_task)
+    assert a_wm["syntax_ok"] and a_wm["uses_3857"] and not a_wm["strict_geo_sound"]
+
+    # Degree-space buffer without projection should fail
+    bad_deg = "import geopandas as gpd\ng = gpd.read_file('a.geojson')\nb = g.buffer(500)\nprint(b.area.sum())\n"
+    a_deg = audit_geo_script(bad_deg, vec_task)
+    assert a_deg["syntax_ok"] and not a_deg["no_degree_metric"] and not a_deg["strict_geo_sound"]
+
+    # Proper local UTM / AEQD projection should pass
+    good_utm = "import geopandas as gpd\ng = gpd.read_file('a.geojson')\ng = g.to_crs(g.estimate_utm_crs())\nprint(g.buffer(500).area.sum())\n"
+    a_good = audit_geo_script(good_utm, vec_task)
+    assert a_good["strict_geo_sound"]
+
+    # Raster without nodata handling fails; with masked=True passes
+    bad_r = "import rasterio\nwith rasterio.open('dem.tif') as s:\n    arr = s.read(1)\n    print(arr.mean())\n"
+    good_r = "import rasterio\nwith rasterio.open('dem.tif') as s:\n    arr = s.read(1, masked=True)\n    print(arr.mean())\n"
+    assert not audit_geo_script(bad_r, rast_task)["strict_geo_sound"]
+    assert audit_geo_script(good_r, rast_task)["strict_geo_sound"]
+
+    # load_probes_from_dir loads valid .py probes cleanly
+    pdir = tmp_path / "probes"
+    pdir.mkdir()
+    (pdir / "p1.py").write_text("from pathlib import Path\ndef perturb(src_dir: Path, dst_dir: Path, seed: int = 42) -> dict:\n    return {'mode': 'noop'}\n")
+    loaded = load_probes_from_dir(pdir, tmp_path / "cache")
+    assert loaded is not None and len(loaded) == 1 and loaded[0][0] == "p1"
+
+
+
+
+

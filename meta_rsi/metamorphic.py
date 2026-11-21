@@ -18,6 +18,7 @@ produces a geometrically equivalent perturbed workspace T(work_dir):
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -102,26 +103,127 @@ def _orient_if_polygonal(g):
     return g
 
 
+# Self-contained physical unit pairs for label-free algebraic invariance probes on tabular+metadata workspaces.
+_TABULAR_UNIT_PAIRS: dict[str, tuple[str, float, float]] = {
+    # src_unit -> (alt_unit, scale_to_alt, offset_to_alt) where val_alt = val_src * scale + offset
+    "m": ("ft", 1.0 / 0.3048, 0.0),
+    "ft": ("m", 0.3048, 0.0),
+    "m2": ("ft2", 1.0 / 0.09290304, 0.0),
+    "ft2": ("m2", 0.09290304, 0.0),
+    "m3": ("L", 1000.0, 0.0),
+    "L": ("m3", 1e-3, 0.0),
+    "kg": ("lb", 1.0 / 0.45359237, 0.0),
+    "lb": ("kg", 0.45359237, 0.0),
+    "s": ("min", 1.0 / 60.0, 0.0),
+    "min": ("s", 60.0, 0.0),
+    "m/s": ("km/h", 3.6, 0.0),
+    "km/h": ("m/s", 1.0 / 3.6, 0.0),
+    "K": ("degC", 1.0, -273.15),
+    "degC": ("K", 1.0, 273.15),
+    "Pa": ("kPa", 1e-3, 0.0),
+    "kPa": ("Pa", 1000.0, 0.0),
+    "N": ("kN", 1e-3, 0.0),
+    "kN": ("N", 1000.0, 0.0),
+    "J": ("kJ", 1e-3, 0.0),
+    "kJ": ("J", 1000.0, 0.0),
+    "W": ("kW", 1e-3, 0.0),
+    "kW": ("W", 1000.0, 0.0),
+    "W/m2": ("kW/m2", 1e-3, 0.0),
+    "kW/m2": ("W/m2", 1000.0, 0.0),
+    "kg/m3": ("g/cm3", 1e-3, 0.0),
+    "g/cm3": ("kg/m3", 1000.0, 0.0),
+    "J/(kg*K)": ("kJ/(kg*K)", 1e-3, 0.0),
+    "kJ/(kg*K)": ("J/(kg*K)", 1000.0, 0.0),
+    "m4": ("cm4", 1e8, 0.0),
+    "cm4": ("m4", 1e-8, 0.0),
+    "rad": ("deg", 180.0 / float(np.pi), 0.0),
+    "deg": ("rad", float(np.pi) / 180.0, 0.0),
+    "g/L": ("mg/L", 1000.0, 0.0),
+    "mg/L": ("g/L", 1e-3, 0.0),
+    "fraction": ("percent", 100.0, 0.0),
+    "percent": ("fraction", 0.01, 0.0),
+}
+
+
 def _perturb_tabular_workspace(
     src_dir: Path,
     dst_dir: Path,
     *,
     shuffle_rows: bool = True,
+    flip_representation: bool = False,
     seed: int = 42,
 ) -> dict:
-    """Label-free metamorphic perturbation for general non-spatial CSV tabular workspaces:
-    shuffles row order, permutes column order, and appends an unused column containing NaNs
-    (catches missing sort_values, positional iloc indexing, and indiscriminate df.dropna()).
+    """Label-free metamorphic perturbation for general non-spatial CSV (and metadata.json) workspaces:
+    shuffles row order, permutes column order, appends an unused NaN column, and—when `metadata.json`
+    declares units/calibration/missing_sentinel—applies invertible physical unit conversions, linear
+    calibration re-encoding, and missing-sentinel swaps.
     """
     rng = np.random.default_rng(seed)
+    meta_path = src_dir / "metadata.json"
+    meta_obj = json.loads(meta_path.read_text()) if meta_path.exists() else None
+    has_schema_meta = isinstance(meta_obj, dict) and isinstance(meta_obj.get("tables"), dict)
+
     n_files = 0
     for p in sorted(src_dir.iterdir()):
         if not p.is_file():
+            continue
+        if p.name == "metadata.json" and has_schema_meta:
             continue
         if p.suffix.lower() != ".csv":
             shutil.copy2(p, dst_dir / p.name)
             continue
         df = pd.read_csv(p)
+
+        if has_schema_meta and p.name in meta_obj["tables"]:
+            tmeta = meta_obj["tables"][p.name]
+            old_sent = tmeta.get("missing_sentinel")
+            # 1. Decode sentinel -> NaN and existing calibration -> declared unit
+            if old_sent is not None:
+                for col in df.columns:
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        m = np.isclose(df[col].to_numpy(dtype=float), float(old_sent), atol=1e-6, equal_nan=False)
+                        if np.any(m):
+                            df.loc[m, col] = np.nan
+            cals = dict(tmeta.get("calibration") or {})
+            for col, cfg in cals.items():
+                if col in df.columns:
+                    df[col] = df[col].astype(float) * float(cfg.get("scale", 1.0)) + float(cfg.get("offset", 0.0))
+
+            # 2. Invertible unit conversion for declared unit columns
+            new_units = dict(tmeta.get("units") or {})
+            for col, u in list(new_units.items()):
+                if col in df.columns and u in _TABULAR_UNIT_PAIRS:
+                    alt_u, sc_u, off_u = _TABULAR_UNIT_PAIRS[u]
+                    df[col] = df[col].astype(float) * sc_u + off_u
+                    new_units[col] = alt_u
+            tmeta["units"] = new_units
+
+            # 3. Re-encode invertible linear calibration when flipping representation
+            new_cals: dict[str, dict[str, float]] = {}
+            for col in cals:
+                if col in df.columns:
+                    if flip_representation:
+                        sc_new, off_new = 0.25, 12.5
+                        df[col] = (df[col].astype(float) - off_new) / sc_new
+                        new_cals[col] = {"scale": sc_new, "offset": off_new}
+                    else:
+                        new_cals[col] = {"scale": 1.0, "offset": 0.0}
+            tmeta["calibration"] = new_cals
+
+            # 4. Swap missing-value sentinel if any numeric column contains NaNs
+            has_nan_numeric = any(
+                pd.api.types.is_numeric_dtype(df[c]) and bool(df[c].isna().any())
+                for c in df.columns
+            )
+            if has_nan_numeric:
+                new_sent = -9999.0 if flip_representation else -999.0
+                for c in df.columns:
+                    if pd.api.types.is_numeric_dtype(df[c]) and bool(df[c].isna().any()):
+                        df[c] = df[c].fillna(new_sent)
+                tmeta["missing_sentinel"] = new_sent
+            else:
+                tmeta["missing_sentinel"] = None
+
         if shuffle_rows and len(df) > 1:
             df = df.iloc[rng.permutation(len(df))].reset_index(drop=True)
         cols = list(df.columns)
@@ -131,6 +233,10 @@ def _perturb_tabular_workspace(
         df["_meta_probe_unused"] = [np.nan if m else "meta" for m in (rng.random(len(df)) < 0.7)]
         df.to_csv(dst_dir / p.name, index=False)
         n_files += 1
+
+    if has_schema_meta:
+        (dst_dir / "metadata.json").write_text(json.dumps(meta_obj, indent=2))
+        return {"mode": "tabular_unit_cal_sentinel_shuffle", "files": n_files}
     return {"mode": "tabular_shuffle_reorder_nancol", "files": n_files}
 
 
@@ -240,7 +346,9 @@ def perturb_workspace(
     layers = _load_workspace_layers(src_dir)
     rasters = sorted(p for p in src_dir.iterdir() if p.is_file() and p.suffix.lower() in RASTER_EXTS)
     if not layers and not rasters:
-        return _perturb_tabular_workspace(src_dir, dst_dir, shuffle_rows=shuffle_rows, seed=seed)
+        return _perturb_tabular_workspace(
+            src_dir, dst_dir, shuffle_rows=shuffle_rows, flip_representation=flip_gpkg_crs, seed=seed
+        )
 
     # Copy any non-spatial auxiliary files verbatim.
     for p in src_dir.iterdir():
