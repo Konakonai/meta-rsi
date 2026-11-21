@@ -154,7 +154,35 @@ Fetched directly from the live OpenStreetMap v0.6 API across 4 real cities spann
 ### 3. Non-GIS Scientific Benchmark Calibration (`benchmarks/sci_units/`, `data/sci_v1`, 760 Tasks)
 - 12 scientific/engineering tabular+`metadata.json` families (8 seen + 4 held-out) auditing physical unit conversions, ADC calibration `(scale, offset)`, missing-value sentinels (`-999/-9999`), and row/column permutations (`ref_pass = 760/760`, `naive_low_pass = 760/760`, `naive_all_pass = 0/760`).
 - Zero-shot `26B-A4B` `seed.py` (`n=280` unseen test): **`ALL = 7.1%` (`HO = 0.0%`, `Lucky = 45.4%`, `Err = 18.2%`)**.
-- Weak verifier `darwinx_soft` (5 gens): `DevLow/InLoop` climbed monotonically `68.8% → 87.5%` (`Dev Lucky: 56.2% → 75.0%`) while `OraDev` remained frozen at `12.5%` and unseen test stalled at **`ALL = 7.1%` (`HO = 0.0%`, `Lucky = 44.6%`, `SilW = 47.9%`)** — reproducing Proxy Lock-In identically outside GIS. (Thinking Meta-Agent `meta_neutral` vs `darwinx_soft` 3-seed comparison queued in Sprint 4 Wave 1B.)
+- Weak verifier `darwinx_soft` (5 gens): `DevLow/InLoop` climbed monotonically `68.8% → 87.5%` (`Dev Lucky: 56.2% → 75.0%`) while `OraDev` remained frozen at `12.5%` and unseen test stalled at **`ALL = 7.1%` (`HO = 0.0%`, `Lucky = 44.6%`, `SilW = 47.9%`)** — reproducing Proxy Lock-In identically outside GIS.
+
+---
+
+## 2.3 Verified v0.5 Results: Sprint 4 6-Seed GSB v2 Matrix, Controls & Verifier-Upgrade Hysteresis (2026-11-21)
+
+All 34 Sprint 4 Wave 1A & 1B evaluation JSONs (`runs/v7_s4_wave1a_g4{a,b}/`, `runs/v7_s4_wave1b_g4{a,b}/`) passed strict auditing with **`usage.errors == 0`** (`python -m meta_rsi.eval.sprint4_summary`).
+
+### 1. GSB v2 Multi-Seed Comparison & Single-Seed Controls (`eval450`, symmetric `26B-A4B → 26B-A4B`)
+
+| Method / Gate | Seeds | **ALL (`n=450`)** | **Seen (`n=300`)** | **Held-Out (`n=150`)** | **`Lucky`** | **`Err`** | **`CompV`** | **`Rast`** | Calls |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Zero-shot `seed.py` | 1 | 30.7% | 33.0% | 26.0% | 44.4% | 10.7% | 2.2% | 31.9% | 1.00 |
+| Static `handcrafted.py` | 1 | 35.1% | 40.7% | 24.0% | 11.3% | 49.6% | 0.0% | 30.0% | 1.15 |
+| Inference-time `runtime_meta.py` | 1 | 57.1% | 57.3% | 56.7% | 21.6% | 10.9% | 49.4% | 44.4% | 2.61 |
+| `naive` (s0) | 1 | 46.9% | 49.7% | 41.3% | 31.6% | 8.4% | 22.8% | 40.0% | 1.43 |
+| `meta_gate_only` (zero diagnostic text, s0) | 1 | 53.6% | 50.0% | 60.7% | 13.6% | 16.7% | 55.6% | 44.4% | 1.42 |
+| `oracle_soft` (3-location oracle upper bound, s0) | 1 | 55.3% | 53.7% | 58.7% | 22.4% | 12.0% | 46.1% | 40.6% | 1.44 |
+| `darwinx_soft` (weak `dev_low`) | 6 | 31.9 ± 1.2% | 33.7 ± 2.1% | 28.3 ± 4.4% | 50.3 ± 3.6% | 5.6 ± 3.7% | 1.3 ± 1.1% | 37.7 ± 3.2% | 1.11 ± 0.09 |
+| `meta_T0` (fixed mid-latitude probe) | 6 | 23.6 ± 5.2% | 28.8 ± 2.6% | 13.0 ± 10.6% | 18.4 ± 22.1% | 41.2 ± 25.3% | 0.7 ± 0.7% | 29.8 ± 4.9% | 1.22 ± 0.23 |
+| `llm_judge` (static code-review rubric) | 6 | 39.5 ± 14.4% | 40.9 ± 11.6% | 36.7 ± 21.4% | 19.8 ± 10.0% | 17.6 ± 18.8% | 20.8 ± 21.2% | 37.1 ± 7.7% | 1.32 ± 0.10 |
+| `coev_tip_only` (Stage-2 from Stage-1 tip alone) | 6 | 37.1 ± 17.7% | 40.8 ± 14.4% | 29.6 ± 25.0% | 14.4 ± 10.8% | 27.4 ± 26.4% | 28.9 ± 30.7% | 36.1 ± 11.6% | 1.31 ± 0.18 |
+
+Key empirical observations from Wave 1A/1B:
+- **6/6 Weak-Verifier Lock-In (`darwinx_soft`)**: Across all 6 paired seeds (`32.2 / 31.1 / 31.8 / 32.0 / 34.0 / 30.4%`), soft regression gating on `dev_low` remains strictly locked in around `31.9 ± 1.2%` (`CompV = 1.3 ± 1.1%`, `Lucky = 50.3 ± 3.6%`).
+- **6/6 Second-Order Lock-In under Fixed Mid-Lat Verifier (`meta_T0`)**: All 6 seeds fall at or below `seed.py` (`22.9 / 17.6 / 30.0 / 19.1 / 29.6 / 22.2%`, mean `23.6 ± 5.2%`); every converged run (`s0, s1, s3, s5`) adopts `gdf.estimate_utm_crs()` and crashes on polar/antimeridian test tasks (`Err = 55–60%`, `CompV = 0.0–1.7%`).
+- **Static LLM-as-a-Judge (`llm_judge`) Variance & UTM Blindspot**: Static rubric evaluation produces high seed variance (`30.0 / 51.1 / 48.0 / 32.7 / 56.2 / 19.1%`, mean `39.5 ± 14.4%`). In `s5`, the judge approved a harness prescribing `gdf.estimate_utm_crs()` (`InLoop = 63.3% vs OraDev = 26.7%`), causing the same second-order polar/antimeridian collapse (`ALL = 19.1%`, `Err = 54.2%`).
+- **Zero-Label Counterfactual Guidance vs. Oracle & Inference-Time Baselines**: At seed 0, `stage2_coev` (`62.9%`, `1.18` calls) outperforms both the 3-location `oracle_soft` upper bound (`55.3%`, `1.44` calls) and inference-time `runtime_meta.py` (`57.1%` at `2.61` calls, 2.2x inference cost), while zero-diagnostic `meta_gate_only` (`53.6%`, `HO = 60.7%`) nearly matches `oracle_soft`.
+- **Verifier-Upgrade Hysteresis (`coev_tip_only` vs. Archive-Preserving Co-Evolution)**: Restarting Stage 2 strictly from the Stage-1 UTM-locked tip (discarding `gen_000`) broke out on `s0` (`62.9%`), `s2` (`44.0%`), and `s5` (`46.2%`), but remained trapped at `g00` on `s1` (`16.7%`) and `s3` (`18.7%`). Audit of Wave 1B logs also identified two domain-neutral infrastructure issues — (i) `_strip_thinking_preamble` splitting on unquoted `</think>`/`<channel|>` inside Python comments (discarding 20–50% of proposals with `NameError`), and (ii) `build_failure_digest()` omitting `workspace_files` and `task_prompt` (blinding the Meta-Agent to `metadata.json` on `SciUnits`, where all 3 seeds of both `darwinx_soft` and `meta_soft` stayed at `7.1%`). Both fixes plus archive-preserving re-scoring (`extra_seed_harnesses` retaining `gen_000` alongside Stage-1 ancestors) are verified in unit tests and queued for Wave 1C.
 
 ---
 
@@ -175,20 +203,18 @@ Fetched directly from the live OpenStreetMap v0.6 API across 4 real cities spann
 ### Phase P0 — Immediate Methodological Rigor & Controls
 - [x] **Complete v0.2 Evaluation Matrix** *(done 2026-11-20)*: Full 480-task test eval + 440-task polar OOD across Gen-0 and 12 `v3_gis` harnesses.
 - [x] **Zero-Leakage Ablation, BF16 Jitter & Non-Evolution Baselines (R2/R3)** *(done 2026-11-21)*: Quantified `k=1` 22.2% BF16 flip floor; completed `handcrafted`, `runtime_meta`, `darwinx_soft` ($\delta=0.14$), `meta_gate_only`, `meta_neutral`, `oracle`, and `±2.2°` true weak-proxy runs.
-- [ ] **Literature Review Package**: Deep-read full texts of `DarwinX`, `Hyperagents`, `When Self-Evolution Backfires`, `GISAgentBench`, `GeoAnalystBench`, `GeoContra`; keep [LITERATURE.md](LITERATURE.md) up to date.
-- [ ] **GSB v2 & Real OSM Validation Slice (Current Priority — A1)**:
-  - Add polar (`>84°N / <80°S`), antimeridian (`±180°`), default `|lat| <= 2.2°` true weak dev proxy, decoupled primary keys, raster/DEM zonal stats (`rasterio` + `nodata`/CRS alignment traps), and multi-step composite pipelines where 26B separates from 4B.
-  - Build a real OpenStreetMap urban validation slice across 3 latitudes (equatorial, mid-latitude, high-latitude).
+- [x] **Literature Review Package**: Verified `DarwinX`, `Hyperagents`, `When Self-Evolution Backfires`, `Double Ratchet`, `Verifier Hardening`, `GISAgentBench`, `GeoAnalystBench`, `GeoContra`; documented in [LITERATURE.md](LITERATURE.md).
+- [x] **GSB v2 & Real OSM Validation Slice (A1)** *(done 2026-11-21)*: Built & audited 1,950-task GSB v2 (polar, antimeridian, `|lat| <= 1.5°` weak proxy, raster/DEM, composite vector pipelines) and live OpenStreetMap 4-latitude urban slice (`data/osm_eval/`, 24 tasks across Singapore, Xuzhou, Helsinki, Tromsø).
 
 ### Phase P1 — True RSI Depth (Beyond Bounded Harness Iteration)
-- [x] **Self-Certified Metamorphic Verifier Co-Evolution (v1 Polar Proof)** *(done 2026-11-21)*: Built `meta_rsi/verifier_agent.py`, verified Attempt-1 non-circular certification + domain-neutral `sys.monitoring` telemetry breaking Polar OOD (`0.2% → 85.9%` A / `13.6% → 82.1%` B).
+- [x] **Self-Certified Metamorphic Verifier Co-Evolution (v1 Polar + GSB v2 Multi-Round)** *(done 2026-11-21)*: Verified strictly hint-free zero-label certification of 3 orthogonal GSB v2 probes + open-weight `26B-A4B` self-certified probe, closing the 43.3 pp verifier–oracle gap (`22.9% → 62.9%` on `eval450`, `100.0%` on real OSM).
 - [x] **Two-Timescale RSI & Dual-G4 Split 26B Closed Loop (v1 Proof — A3)** *(done 2026-11-21)*: Built reusable `meta_rsi/training/` (`lora_sync.py`, `collect_trajectories.py`, `split_two_timescale.py`), verified 100% open-weight `26B → 26B` compounding (`36.5% → 86.2% → 88.3% [SFT] → 92.1% [+GRPO] → 93.3% [Gen-2]`, vs `SFT-Weak` collapse to `22.5%`).
-- [ ] **Full Open-Weight Symmetric Co-Evolution on GSB v2 (A2)**: Move `verifier_agent.py` proposal to 100% open-weight `26B-A4B` and run multi-round Verifier–Solver + Two-Timescale RSI on GSB v2.
+- [ ] **Two-Timescale Weight Internalization on GSB v2 (Wave S4-2)**: Run Dual-G4 Split `SFT-Weak` vs `SFT-Meta` + `GRPO-Metamorphic` (with certified probes) on GSB v2 `train[20:60]` and evaluate bare `seed.py` on `eval450`, real OSM, and `GeoAnalystBench`.
 
 ### Phase P2 — External Generalization & Publication
-- [ ] **Scale to ≥6–8 Paired Seeds + `llm_judge` Control** on GSB v2 (full unseen test set).
-- [ ] **External Benchmark Transfer**: Evaluate evolved harnesses/weights on Python analysis subsets of `GeoAnalystBench` (`arXiv:2509.05881`) and `GISAgentBench` (`arXiv:2608.01645`).
-- [ ] **Non-GIS Cross-Domain Generalization**: Non-saturated general Python/numerical benchmark with self-certified invariance operators (units/coordinate frame/row permutation) to verify domain-agnostic generality.
+- [x] **6-Seed GSB v2 Matrix + `llm_judge` & `oracle_soft` Controls** *(Wave 1A/1B done; Wave 1C Archive-Preserving Co-Ev & fixed `SciUnits` queued)*: Completed 6 seeds each of `darwinx_soft`, `meta_T0`, `llm_judge`, `coev_tip_only`, plus `runtime_meta`, `naive`, `meta_gate_only`, `oracle_soft`.
+- [ ] **External Benchmark Transfer**: Run deterministic CRS/metric/raster audit on 17 open-source `GeoAnalystBench` Python tasks (`meta_rsi/eval/geoanalyst_eval.py`) across Base, `SFT-Weak`, `SFT-Meta`, and `GRPO-Metamorphic` 26B weights.
+- [ ] **Non-GIS Cross-Domain Generalization (`SciUnits`)**: Run 3-seed fair `darwinx_soft` vs `meta_soft` (with `workspace_files` + `prompt` digest) and zero-label tabular verifier co-evolution on `data/sci_v1`.
 
 ---
 
