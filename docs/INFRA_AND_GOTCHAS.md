@@ -59,7 +59,7 @@ Measured on Colab G4 (96 GB) via `gis-grpo-pilot` (`TRL 1.18.1` `GRPOTrainer`, L
 | Qwen3.8-27B (think `low`, no vLLM) | 250–335 s | 191–257 s | 934–1,110 | 62.7 GB | Default `xhigh` hits 4096 cap (~650 s/step) |
 | Qwen3.8-27B + vLLM colocate (sleep mode) | OOM | — | — | >96 GB | 50 GB training weights + vLLM copy exceeds 96 GB |
 | Gemma 4 26B-A4B (think, no vLLM) | 800–940 s | 750–877 s | 2,383–2,779 | 61.4 GB | MoE slow without vLLM |
-| **Gemma 4 26B-A4B (Split 2×G4: vLLM + LoRA r=16)** | **~30–68 s** | **~24–62 s** | 500–800 | **67.3 GB** | **Verified 2026-11-21**: `g4-b` vLLM (`--enable-lora`) + `g4-a` bf16 trainer (3.1 s bwd, 74 MB LoRA, **43 ms** live hot-reload); **13×–25× faster** than single-card |
+| **Gemma 4 26B-A4B (Split 2×G4: vLLM + LoRA r=16, production)** | **42.9 s** | **13–21 s** | 400–800 | **56.7 GB** | **Verified 2026-11-21** (`meta_rsi/training/split_two_timescale.py`, 24 online GRPO steps × 32 rollouts, dual PEFT `sft_ref`+`policy`, `29.3 MB` bf16 gzip sync, **34.6–34.8 ms** vLLM hot-reload; **~20× faster** than single-card) |
 | Gemma 4 E4B (no-think, no vLLM, max 768) | **~41 s** | ~37 s | 250–450 | ~24 GB | Verified 2026-11-21 (60 steps GRPO in ~41 min) |
 | Gemma 4 31B (think) | OOM | — | — | >96 GB | OOM on single-sample backward pass |
 
@@ -71,4 +71,5 @@ Measured on Colab G4 (96 GB) via `gis-grpo-pilot` (`TRL 1.18.1` `GRPOTrainer`, L
 - **Gemma 4 multimodal LoRA module collision**: Gemma 4's vision/audio towers share short layer names (`q_proj`, `k_proj`, etc.) with the language model. Specify **full module paths** targeting only the language-model linear layers (`language_model.*`).
 - **Gemma 4 merged checkpoint vLLM reload**: When saving a merged Gemma 4 LoRA checkpoint for vLLM serving, call `AutoProcessor.from_pretrained(MODEL_ID).save_pretrained(merged_dir)` alongside `merged.save_pretrained` and `tokenizer.save_pretrained` — otherwise vLLM fails with `OSError: Can't load feature extractor` (missing `processor_config.json`).
 - **Qwen3.8-27B hybrid architecture**: Requires `flash-linear-attention` + `causal-conv1d`, and LoRA targets must include DeltaNet layers (`in_proj_qkv`, `in_proj_z`, `out_proj`) alongside attention/MLP projections.
+- **Colab Contents API & single-SSH limits**: `colab upload` returns HTTP 500 if the remote parent directory does not yet exist (upload into `/content/` or create the dir first); each Colab session allows only one active `colab ssh` connection (HTTP 429 on a second concurrent SSH session). When launching `vLLM` with dynamic LoRA updates for multi-adapter serving, pass `--enable-lora --max-loras 4 --max-lora-rank 16` alongside `VLLM_ALLOW_RUNTIME_LORA_UPDATING=1`.
 - **Checkpointing**: Always mirror checkpoints to Google Drive or download immediately to avoid session-drop loss.

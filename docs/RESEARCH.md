@@ -2,7 +2,7 @@
 
 > Living master document for the `meta-rsi` research project, undergraduate thesis, and SCI / top-venue manuscript.
 > Repository: `https://github.com/Konakonai/meta-rsi`
-> Last updated: 2026-11-20.
+> Last updated: 2026-11-21.
 > Related long-term docs: [LITERATURE.md](LITERATURE.md) · [GSB_V1_BASELINE.md](GSB_V1_BASELINE.md) · [INFRA_AND_GOTCHAS.md](INFRA_AND_GOTCHAS.md)
 
 ---
@@ -72,50 +72,90 @@ Key empirical findings from Polar OOD (directly answering **Risk R1** and motiva
 
 ---
 
+## 2.1 Verified v0.3 Results: Zero-Leakage Phase Diagram, Verifier Co-Evolution & Two-Timescale 26B RSI (2026-11-21)
+
+All 49 v4/v5 evaluation JSONs (`runs/v4_*`, `runs/v5_two_timescale/`) passed strict auditing with **`usage.errors == 0`** on full unseen `eval480` ($n = 480$) and Polar OOD Protocol A/B.
+
+### 1. BF16 Jitter Floor & Non-Evolution Baselines (`runs/v4_jitter_check.json`, `runs/v4_block1_evals/`)
+- **BF16 evaluation jitter**: Re-evaluating identical `seed.py` on `dev-36` (`gemma-4-E4B-it`, `temp=0.0`, `workers=16`) yields a `k=1` per-task flip rate of **22.2%** (`8.0/36` flips, mean `4.0` one-way regressions; `maj@3` reduces flip rate only to `16.7%`). Strict `max_regress=0` therefore rejects valid candidates even under an Oracle gate, motivating soft bounded regression ($\delta = 0.14$) for fair DarwinX comparisons.
+- **Non-evolution baselines (frozen E4B no-think, `n = 480`)**: 15-minute expert `handcrafted.py` scores **74.2% ALL / 87.5% HO / 1.5% Lucky** (`1.51` calls); inference-time `runtime_meta.py` scores **70.0% ALL / 83.3% HO / 6.0% Lucky** (`2.12` calls).
+- **Polar OOD Protocol B (live deployment)**: Deploying fixed mid-latitude `v3_s2_meta` directly on polar workspaces induces panic fallback to `EPSG:3857` during repair turns (`17.7%` correct, `55.0%` silent `Lucky+SilW`, `SwRun=283`).
+
+### 2. Zero-Leakage Single-Factor Ablation & True Weak-Proxy Phase Boundary (`runs/v4_wave1_evals/`)
+- **Controlled 3-seed ablation (`±7°`, `--minimal-meta-prompt`, `parent_policy=best`, $\delta=0.14$, Gemini-4 Meta → 4B Task, `n=480`)**:
+  - `naive`: `75.2 ± 0.4%` (`74.8 / 75.6 / 75.2`, Lucky `5.9%`)
+  - `darwinx_soft` ($\delta=0.14$): `76.9 ± 1.1%` (`78.1 / 75.8 / 76.9`, Lucky `5.9%`)
+  - `meta_gate_only` (zero metamorphic diagnostic text): **`80.8 ± 2.0%`** (`81.7 / 78.5 / 82.3`, HO `93.6%`, Lucky `4.1%`) — outperforms `darwinx_soft` on 3/3 seeds (`+3.9 pp`) and `handcrafted` (`+6.6 pp`).
+  - `meta_neutral` (anonymized `probe_1/probe_2`): **`84.0% / 84.6%`** (HO `98.3% / 100.0%`, Lucky `1.5% / 0.4%`) on converged seeds `s0/s1`, `55.6%` on mid-transition `s2` (4-gen cap; mean `74.7%`, lowest Lucky `2.2%`).
+  - `oracle` (`max_regress=0`): `69.0 ± 15.9%` (`51.2 / 73.8 / 82.1`), confirming `max_regress=0` suffers under BF16 jitter.
+- **True weak proxy (`|lat| <= 2.2°`, `EPSG:3857` area error $< 0.81\%$)**: On `v4_eq2_s1`, `darwinx_soft` ($\delta=0.14$) locked in at Gen 1 (`eval480 = 35.0% ALL / 27.5% HO / 32.5% Lucky`) while rejecting genuine Gen-2 (`OraDev=69.4%, Lucky=0.0%`) and Gen-3 (`OraDev=61.1%`) fixes; `meta_neutral` reached **`79.4% ALL / 91.7% HO / 2.3% Lucky`** (`+44.4 pp`).
+
+### 3. Self-Certified Verifier Co-Evolution Breaking Polar OOD (`runs/v4_coev_polar/`)
+- Starting from mid-latitude `v4_clean_s1_meta_neutral` (`eval480 = 84.6%`, Polar-A `0.2%`, Polar-B `13.6%`), `meta_rsi/verifier_agent.py` autonomously proposed a polar AEQD relocation (`86.5°N, 15.0°E`) and passed non-circular conservation certification on Attempt 1 (`max_area_err=0.00000%`, `max_len_err=0.00000%`, `max_dist_err=0.00123%`, `topo_mismatches=0`, `max_disp_km=11007.1`, `caught=8/8`).
+- Controlled telemetry ablation: without `sys.monitoring` swallowed-exception telemetry (`solver_stage2`), evolution stalled at `16.7%` due to an `except RuntimeError: EPSG:3857` fallback; adding 5 lines of domain-neutral telemetry (`solver_stage3_telemetry`) resolved the fallback in 3 generations (`in_loop 11.1% → 88.9%`), yielding **`eval480 = 87.3% ALL / 98.3% HO / 0.6% Lucky / 1.7% Err` (`1.16` calls)**, **Polar-A `85.9%` (`+85.7 pp`)**, and **Polar-B `82.1%` (`+68.5 pp`, `SilW=0.7%`)**.
+
+### 4. Weight-Level GRPO Pilot on E4B (`runs/v4_grpo/`, 60 steps, 1,920 rollouts, bare `seed.py`)
+- `GRPO-Weak` nearly doubled in-training weak reward (`0.259 → 0.498`) by burning `EPSG:3857` into weights (`20.0% → 42.2%`, peak `84.4%`), inflating `eval480` `Lucky` (`31.2% → 38.3%`, HO `42.5%`) while degrading HO accuracy (`27.5% → 24.2%`) and yielding `57.9%` `SilW` on Polar OOD-B.
+- `GRPO-Metamorphic` blocked `389/1,920` shortcuts, held `eval480` `Lucky` to `29.8%` (`-8.5 pp` vs `GRPO-Weak`) and cut Polar OOD-B `SilW` by `-12.2 pp` (`45.7%`), but exposed a sparse-reward exploration bottleneck from scratch (`218/1,920 = 11.4%` full-reward rollouts, `eval480 = 27.1%`) — motivating Two-Timescale RSI.
+
+### 5. 100% Open-Weight Symmetric 26B-A4B RSI & Dual-G4 Two-Timescale Closed Loop (`runs/v4_sym26b_evals/`, `runs/v5_two_timescale/`)
+All stages below use solely open-weight `google/gemma-4-26B-A4B-it` (`no-think`), zero closed APIs, zero 3-location oracle labels during training/evolution, and strictly disjoint splits (`dev = train[0:6]`, `distill/GRPO = train[20:55]`, `test = eval480`):
+
+| Stage | Model Weights | Eval Harness | Avg Calls | **Test ALL (`n=480`)** | **Seen (`n=360`)** | **Held-out (`n=120`)** | **`Lucky`** | **`SilW`** | **`Err`** |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Gen-0 Baseline | Base 26B | Bare `seed.py` | 1.00 | 36.5% | 38.9% | 29.2% | 39.2% | 19.6% | 4.8% |
+| Gen-1 `darwinx_soft` (s0 / s1) | Base 26B | Evolved Harness | 1.08 / 1.01 | **20.0% / 20.4%** | 24.7% / 25.3% | **5.8% / 5.8%** | **63.7% / 59.0%** | 16.0% / 19.0% | 0.2% / 1.7% |
+| Distillation Control (`SFT-Weak`) | `sft_weak` LoRA | **Bare `seed.py`** | **1.00** | **22.5%** | 25.6% | **13.3%** | **59.0%** | 17.7% | 0.8% |
+| Gen-1 `meta_neutral` (s1 Teacher) | Base 26B | Evolved Harness | 1.50 | 86.2% | 86.7% | 85.0% | 7.5% | 6.2% | 0.0% |
+| Internalization Stage 1 (`SFT-Meta`) | `sft_meta` LoRA | **Bare `seed.py`** | **1.00** | **88.3%** | 85.8% | **95.8%** | **1.0%** | 4.0% | 6.7% |
+| Internalization Stage 2 (`+GRPO-Meta`) | `grpo_meta_final` | **Bare `seed.py`** | **1.00** | **92.1%** | 90.3% | **97.5%** | **0.4%** | 3.8% | 3.8% |
+| **Gen-2 Compounding RSI** | `grpo_meta_final` | **Gen-2 Harness (zero GIS rules)** | **1.09** | **93.3%** | **91.7%** | **98.3%** | **0.4%** | 5.8% | **0.4%** |
+
+Key takeaways:
+- **Inverse scaling of Proxy Lock-In**: Under symmetric open-weight evolution, `26B-A4B` starts at `DevLow=80.6%` (`OraDev=33.3%`) and under `darwinx_soft` actively writes `EPS:3857` into its own prompt (`2/2` seeds degrade from `36.5% → 20.0% / 20.4%`); distilling those weak trajectories (`SFT-Weak`, `95.0%` `EPSG:3857`) permanently degrades bare weights to `22.5%` (`Lucky 59.0%`).
+- **Complete Two-Timescale compounding**: Metamorphic trajectory distillation (`537/630` kept) eliminates the sparse-reward bottleneck (`21–32/32` full rewards per GRPO step), raises single-turn bare weights to `88.3%` (`SFT-Meta`) and `92.1%` (`+24` steps Dual-G4 online `GRPO-Metamorphic`, `42.9s/step`, `56.7 GB` VRAM), and enables a completely domain-agnostic Gen-2 error-recovery harness to reach **`93.3%` ALL / `98.3%` Held-out / `0.4%` Lucky / `0.4%` Err** at `1.09` calls (`12/21` families at `100%`), confirming GSB v1 saturation and motivating **GSB v2**.
+
+---
+
 ## 3. Open Methodological Risks & Mitigation Tracker
 
 | ID | Risk / Reviewer Critique | Current Status | Concrete Mitigation |
 |---|---|---|---|
-| **R1** | **Target-location overlap**: `metamorphic.py` relocates local inputs to `(58.3°, 6.0°)` / `(-56.2°, 12.0°)`, which overlaps GSB v1 `high` (`±52–64°`) and `zone_edge` (`6°` grid). | **Full-440 Polar OOD complete (2026-11-20); GSB v2 & P1 verifier next** | Completed full 440-task Polar OOD stress test across all 13 harnesses (`runs/eval_ood/`): proved `metamorphic` fails loudly (`83.7%` Error, `2.7%` SilW) instead of silently (`preserve` `42.5%` silent), uncovered the hardcoded-UTM polar cylinder pitfall, and established the concrete need for polar/antimeridian AEQD operators in GSB v2 & Phase P1. |
-| **R2** | **Diagnostic hint leakage in v0.2**: `evaluator.py` previously appended a GIS/CRS hint string inside `meta_diag` on metamorphic mismatch. | **Code fixed (2026-11-20), ablation pending** | `evaluator.py` is now **100% domain-neutral by default** (`include_domain_hint=False`); pass `--meta-domain-hints` only for explicit ablation (`meta_neutral` vs `meta_domain_hint`). |
-| **R3** | **Missing gate baselines & seed count**: Need Oracle upper bound, LLM-judge gate, and ≥8 seeds on all 480 test tasks for publishable power. | **Full-480 complete for 4 seeds (2026-11-20); `--gate oracle` ready, `llm_judge` pending** | Run `--gate oracle` and a `gemini-decision-1` rubric gate alongside `naive`/`preserve`/`metamorphic`; expand to ≥8 seeds on GSB v2. |
-| **R4** | **Swallowed-exception degradation**: Rule-heavy prompts caused 26% of runnable-but-wrong scripts to catch runtime exceptions and print `0`. | **Telemetry run on Polar OOD + `swallowed_runnable_count` added (2026-11-20)** | Log `dev_swallowed_rate` during evolution and `swallowed_runnable_count` on OOD/test evals to verify evolved harnesses do not hide exceptions. |
-| **R5** | **Bounded iteration vs true RSI**: Fixed human-written `metamorphic.py` + fixed Meta-Prompt could be viewed by ICML/NeurIPS reviewers as bounded harness search rather than true RSI. | **Planned (Phase P1)** | Implement self-discovering/co-evolving invariants, HyperAgents-style metacognitive self-modification, and Two-Timescale Harness → Weight internalization. |
+| **R1** | **Target-location overlap**: `metamorphic.py` relocates local inputs to `(58.3°, 6.0°)` / `(-56.2°, 12.0°)`, overlapping GSB v1 `high`/`zone_edge`. | **Resolved via Polar OOD Protocol A/B & Self-Certified Co-Evolution (2026-11-21); GSB v2 next** | Demonstrated self-certified polar verifier discovery breaking Polar-A (`0.2% → 85.9%`) and Polar-B (`13.6% → 82.1%`) with zero polar hints or labels; expanding to polar + antimeridian + raster/OSM in GSB v2. |
+| **R2** | **Diagnostic hint leakage in v0.2**: `evaluator.py` previously appended a GIS/CRS hint string inside `meta_diag`. | **Resolved (2026-11-21)** | Verified `--minimal-meta-prompt` + anonymized `probe_1/probe_2` AND zero-diagnostic `meta_gate_only` (`80.8%`, 3/3 seeds > `darwinx_soft` `76.9%`). |
+| **R3** | **Missing baselines & seed count**: Need non-evolution baselines, Oracle/soft-DarwinX/LLM-judge controls, and ≥6–8 seeds. | **Non-evolution, soft-DarwinX & Oracle completed (2026-11-21); `llm_judge` & ≥6 seeds planned on GSB v2** | Completed `handcrafted` (`74.2%`), `runtime_meta` (`70.0%`), `darwinx_soft` ($\delta=0.14$), and `oracle`; scale full multi-seed matrix + `llm_judge` on GSB v2. |
+| **R4** | **Swallowed-exception degradation**: Rule-heavy prompts and OOD fallbacks silently swallow exceptions. | **Resolved & ablated (2026-11-21)** | Domain-neutral `sys.monitoring` telemetry broke 2nd-order `except RuntimeError: EPSG:3857` lock-in during polar co-evolution (`16.7% → 88.9%` in-loop). |
+| **R5** | **Bounded iteration vs true RSI**: Fixed human-written `metamorphic.py` + closed-API Meta-Agent. | **Core mechanisms verified (2026-11-21)** | Verified (a) non-circular self-certified verifier co-evolution, (b) 100% open-weight symmetric `26B → 26B` evolution, and (c) Dual-G4 Two-Timescale Harness → SFT + GRPO-Metamorphic → Gen-2 compounding (`36.5% → 93.3%`). |
 
 ---
 
 ## 4. Phased Technical Roadmap
 
 ### Phase P0 — Immediate Methodological Rigor & Controls
-- [ ] **Literature Review Package**: Deep-read full texts of `DarwinX`, `Hyperagents`, `When Self-Evolution Backfires`, `GISAgentBench`, `GeoAnalystBench`, `GeoContra`; keep [LITERATURE.md](LITERATURE.md) up to date as the Related Work backbone.
-- [ ] **Neutral-Diagnostic Ablation (R2)**: Run paired seeds of `metamorphic` with default domain-neutral `meta_diag` vs `--meta-domain-hints` to verify Meta-Agent diagnoses CRS drift purely from numeric inconsistency + code inspection.
-- [x] **Complete v0.2 Evaluation Matrix** *(done 2026-11-20)*: Finished full 480-task test eval (`runs/eval480/`, 13/13 `usage.errors == 0`) + full 440-task polar OOD stress test (`runs/eval_ood/`, 13/13 `usage.errors == 0`, `--track-caught`) on Gen-0 seed + all 12 `v3_gis` harnesses; updated `analysis.py`, SVG figures (`fig_rsi_gates.svg`, `fig_polar_ood.svg`), and docs.
-- [ ] **Upper-Bound & LLM-Judge Gate Controls (R3)**: Run `--gate oracle` baseline + implement & run `gemini-decision-1` rubric gate (`--gate llm_judge`).
-- [ ] **GSB v2 & Real OSM Validation Slice**:
-  - Add polar (`>84°N / <80°S`), antimeridian (`±180°`), decoupled primary keys (`home_id`/`facility_id` vs duplicate `id`), and non-projection held-out traps (raster zonal stats with `nodata`, one-to-many `sjoin` deduplication).
-  - Build a 20–30 task **real OpenStreetMap urban validation slice** across 3 latitudes (Singapore, Xuzhou, Helsinki) with map overlay figures comparing `EPSG:3857` vs proper projection buffers.
+- [x] **Complete v0.2 Evaluation Matrix** *(done 2026-11-20)*: Full 480-task test eval + 440-task polar OOD across Gen-0 and 12 `v3_gis` harnesses.
+- [x] **Zero-Leakage Ablation, BF16 Jitter & Non-Evolution Baselines (R2/R3)** *(done 2026-11-21)*: Quantified `k=1` 22.2% BF16 flip floor; completed `handcrafted`, `runtime_meta`, `darwinx_soft` ($\delta=0.14$), `meta_gate_only`, `meta_neutral`, `oracle`, and `±2.2°` true weak-proxy runs.
+- [ ] **Literature Review Package**: Deep-read full texts of `DarwinX`, `Hyperagents`, `When Self-Evolution Backfires`, `GISAgentBench`, `GeoAnalystBench`, `GeoContra`; keep [LITERATURE.md](LITERATURE.md) up to date.
+- [ ] **GSB v2 & Real OSM Validation Slice (Current Priority — A1)**:
+  - Add polar (`>84°N / <80°S`), antimeridian (`±180°`), default `|lat| <= 2.2°` true weak dev proxy, decoupled primary keys, raster/DEM zonal stats (`rasterio` + `nodata`/CRS alignment traps), and multi-step composite pipelines where 26B separates from 4B.
+  - Build a real OpenStreetMap urban validation slice across 3 latitudes (equatorial, mid-latitude, high-latitude).
 
 ### Phase P1 — True RSI Depth (Beyond Bounded Harness Iteration)
-- [ ] **Self-Discovering / Co-Evolving Metamorphic Verifier**: When in-loop accuracy saturates or `LARGE_EXTENT` stagnates, spawn a Verifier/Diagnostic Agent to autonomously propose/select candidate domain-preserving perturbations (polar relocation, scale/unit checks, CRS storage flip, schema/column permutation, raster nodata perturbation) and validate their invariance on seed sanity checks.
-- [ ] **Metacognitive Self-Modification (HyperAgents-style)**: Let the Meta-Agent co-evolve its own diagnosis/mutation policy and archive selection parameters alongside `harness.py`, measuring cross-generation meta-gain.
-- [ ] **Two-Timescale RSI (Harness → Weight Internalization)**: Distill verified trajectories from the evolved Harness back into `gemma-4-E4B-it` weights via LoRA SFT / GRPO on Colab G4 (using timing & gotcha configs in [INFRA_AND_GOTCHAS.md](INFRA_AND_GOTCHAS.md)), prune prompt rules, and run Generation-2 Harness evolution on the internalized weights.
+- [x] **Self-Certified Metamorphic Verifier Co-Evolution (v1 Polar Proof)** *(done 2026-11-21)*: Built `meta_rsi/verifier_agent.py`, verified Attempt-1 non-circular certification + domain-neutral `sys.monitoring` telemetry breaking Polar OOD (`0.2% → 85.9%` A / `13.6% → 82.1%` B).
+- [x] **Two-Timescale RSI & Dual-G4 Split 26B Closed Loop (v1 Proof — A3)** *(done 2026-11-21)*: Built reusable `meta_rsi/training/` (`lora_sync.py`, `collect_trajectories.py`, `split_two_timescale.py`), verified 100% open-weight `26B → 26B` compounding (`36.5% → 86.2% → 88.3% [SFT] → 92.1% [+GRPO] → 93.3% [Gen-2]`, vs `SFT-Weak` collapse to `22.5%`).
+- [ ] **Full Open-Weight Symmetric Co-Evolution on GSB v2 (A2)**: Move `verifier_agent.py` proposal to 100% open-weight `26B-A4B` and run multi-round Verifier–Solver + Two-Timescale RSI on GSB v2.
 
 ### Phase P2 — External Generalization & Publication
-- [ ] **Scale to ≥8 Paired Seeds** across all gates on GSB v2 (full test set).
-- [ ] **Cross-Model Zero-Shot Transfer**: Evaluate E4B-evolved harnesses zero-shot on `gemma-4-26B-A4B-it`, `Qwen3.8-27B`, and Gemini 4.
-- [ ] **External Benchmark Transfer**: Evaluate evolved harnesses on Python analysis subsets of `GeoAnalystBench` (`arXiv:2509.05881`) and `GISAgentBench` (`arXiv:2608.01645`).
-- [ ] **Broader Geospatial & Non-GIS Generalization**:
-  - Controlled **Google Earth Engine (GEE)** / raster (`rasterio`) task subset.
-  - Non-saturated general Python/tabular benchmark (`benchmarks/py_v2/`, target Gen-0 `OraDev < 35%, Lucky > 30%`) to demonstrate domain-agnostic generality.
+- [ ] **Scale to ≥6–8 Paired Seeds + `llm_judge` Control** on GSB v2 (full unseen test set).
+- [ ] **External Benchmark Transfer**: Evaluate evolved harnesses/weights on Python analysis subsets of `GeoAnalystBench` (`arXiv:2509.05881`) and `GISAgentBench` (`arXiv:2608.01645`).
+- [ ] **Non-GIS Cross-Domain Generalization**: Non-saturated general Python/numerical benchmark with self-certified invariance operators (units/coordinate frame/row permutation) to verify domain-agnostic generality.
 
 ---
 
 ## 5. Local Run & Artifact Registry (Gitignored Data)
 
 - `data/v1/`: 2,700 train + 480 test tasks (`tasks.jsonl` + variant directories).
-- `results/zero_shot_v1/`: 5 zero-shot baselines (`e4b_think`, `e4b_think_hint`, `e4b_think_rules`, `q27_low`, `g26b_think`), rule & `gemini-decision-1` error labels (`errors_r2.json`, `errors_llm_v2.jsonl`), `caught_{base,rules}.json`, and blind spot-checks.
-- `runs/v3_gis_s{0..3}_{naive,preserve,meta}/`: Canonical v0.2 4-seed evolution trajectories.
-- `runs/eval480/*.json`: **Complete full-480 unseen test matrix** (13/13 JSONs verified `n=480, usage.errors == 0`).
-- `runs/eval_ood/*.json`: **Complete full-440 Polar OOD stress-test matrix** (13/13 JSONs verified `n=440, usage.errors == 0`, `--track-caught`).
-- `runs/eval150/*.json`: Earlier 150-task stratified subset (13/13 JSONs verified `usage.errors == 0`, archived for reference).
-- Earlier diagnostic runs (archived locally for reference only — do not mix into `v3_gis` aggregates): `local_pilot_meta`, `g4_e4b_*` (v0.1 `temp=0.2, dev=18`), `v2_gis_s0_*` (pre-scaling-fix), `v3_py_s0_*` (saturated `py_v1` draft).
+- `results/zero_shot_v1/`: 5 zero-shot baselines (`e4b_think`, `e4b_think_hint`, `e4b_think_rules`, `q27_low`, `g26b_think`), rule & `gemini-decision-1` error labels, `caught_{base,rules}.json`.
+- `runs/v3_gis_s{0..3}_{naive,preserve,meta}/`, `runs/eval480/`, `runs/eval_ood/`: Canonical v0.2 4-seed archive and full-480 / Polar-440 evals.
+- `runs/v4_jitter_check.json`, `runs/v4_split_2g4_bench.json`: BF16 jitter floor and Dual-G4 split feasibility measurements.
+- `runs/v4_block1_evals/`, `runs/v4_wave1_evals/`, `runs/v4_coev_polar/`, `runs/v4_sym26b_evals/`, `runs/v4_sym26b_harnesses/`, `runs/v4_grpo/`: Complete v4 ablation, co-evolution, symmetric 26B, and E4B GRPO artifacts (all 45 JSONs `usage.errors == 0`).
+- `runs/v5_two_timescale/`: Complete A3 Dual-G4 26B Two-Timescale RSI artifacts — disjoint `train[20:55]` trajectories, `sft_weak` / `sft_meta` / `grpo_meta_final` summaries & full `eval480` JSONs, Gen-2 archive & `gen2_best_harness.py`, and trained bf16 LoRA checkpoint (`lora_grpo_meta_final/`, all 4 eval JSONs `usage.errors == 0`).
