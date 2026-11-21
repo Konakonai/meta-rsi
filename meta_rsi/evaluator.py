@@ -80,7 +80,7 @@ def _run_metamorphic_check(
     probe names are anonymized (`probe_1`, `probe_2`, ...) and internal transform mode names
     (`local_aeqd_shift`, `crs_storage_flip`, etc.) are NEVER revealed to the Meta-Agent.
     """
-    has_gpkg = any(p.suffix.lower() == ".gpkg" for p in src_dir.iterdir() if p.is_file())
+    has_gpkg = any(p.suffix.lower() in {".gpkg", ".tif", ".tiff"} for p in src_dir.iterdir() if p.is_file())
     checks: list[tuple[str, dict | object]] = [
         ("shift_and_shuffle", dict(target_lat=58.3, target_lon=6.0, shuffle_rows=True, flip_gpkg_crs=False, seed=42))
     ]

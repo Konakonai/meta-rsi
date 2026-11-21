@@ -29,6 +29,7 @@ import shapely.affinity
 from pyproj import CRS, Geod, Transformer
 
 SPATIAL_EXTS = {".geojson", ".gpkg", ".csv"}
+RASTER_EXTS = {".tif", ".tiff"}
 _WGS84_GEOD = Geod(ellps="WGS84")
 
 
@@ -133,6 +134,92 @@ def _perturb_tabular_workspace(
     return {"mode": "tabular_shuffle_reorder_nancol", "files": n_files}
 
 
+def _relocate_geotiff(
+    src_path: Path,
+    dst_path: Path,
+    *,
+    src_lat: float,
+    src_lon: float,
+    target_lat: float,
+    target_lon: float,
+    flip_crs_and_nodata: bool = False,
+) -> dict:
+    """Isometrically transport a GeoTIFF from (src_lat, src_lon) to (target_lat, target_lon) via local AEQD."""
+    import rasterio
+    from rasterio.warp import Resampling, calculate_default_transform, reproject
+
+    src_aeqd = _aeqd_crs(src_lat, src_lon)
+    dst_aeqd = _aeqd_crs(target_lat, target_lon)
+
+    with rasterio.open(src_path) as src:
+        orig_crs = src.crs
+        orig_nodata = float(src.nodata) if src.nodata is not None else -9999.0
+        # 1. Warp into source local AEQD metres (near-exact metric grid)
+        tr_aeqd, w_a, h_a = calculate_default_transform(
+            orig_crs, src_aeqd, src.width, src.height, *src.bounds
+        )
+        arr_aeqd = np.full((h_a, w_a), np.float32(orig_nodata), dtype=np.float32)
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=arr_aeqd,
+            src_transform=src.transform,
+            src_crs=orig_crs,
+            src_nodata=orig_nodata,
+            dst_transform=tr_aeqd,
+            dst_crs=src_aeqd,
+            dst_nodata=orig_nodata,
+            resampling=Resampling.bilinear,
+        )
+
+    # 2. Choose target storage CRS & nodata sentinel
+    if abs(target_lat) >= 84.0:
+        target_crs = CRS.from_epsg(3413 if target_lat >= 0 else 3031) if not flip_crs_and_nodata else CRS.from_epsg(4326)
+    elif flip_crs_and_nodata:
+        target_crs = CRS.from_epsg(4326) if (orig_crs is None or not orig_crs.is_geographic) else CRS.from_epsg(3857)
+    else:
+        target_crs = CRS.from_epsg(3857)
+
+    new_nodata = (-32768.0 if abs(orig_nodata + 9999.0) < 1e-3 else -9999.0) if flip_crs_and_nodata else orig_nodata
+
+    # 3. Re-tag (arr_aeqd, tr_aeqd) to dst_aeqd (zero-distortion isometric transport) and project to target_crs
+    left = tr_aeqd.c
+    top = tr_aeqd.f
+    right = left + w_a * tr_aeqd.a
+    bottom = top + h_a * tr_aeqd.e
+    tr_out, w_o, h_o = calculate_default_transform(
+        dst_aeqd, target_crs, w_a, h_a, left, bottom, right, top
+    )
+    arr_out = np.full((h_o, w_o), np.float32(new_nodata), dtype=np.float32)
+    reproject(
+        source=arr_aeqd,
+        destination=arr_out,
+        src_transform=tr_aeqd,
+        src_crs=dst_aeqd,
+        src_nodata=orig_nodata,
+        dst_transform=tr_out,
+        dst_crs=target_crs,
+        dst_nodata=new_nodata,
+        resampling=Resampling.bilinear,
+    )
+
+    with rasterio.open(
+        dst_path,
+        "w",
+        driver="GTiff",
+        height=h_o,
+        width=w_o,
+        count=1,
+        dtype="float32",
+        crs=target_crs,
+        transform=tr_out,
+        nodata=float(new_nodata),
+        compress="deflate",
+    ) as dst:
+        dst.write(arr_out, 1)
+
+    return {"dst_crs": target_crs.to_string(), "nodata": new_nodata}
+
+
 def perturb_workspace(
     src_dir: Path,
     dst_dir: Path,
@@ -145,25 +232,61 @@ def perturb_workspace(
 ) -> dict:
     """Create a label-preserving perturbed copy of `src_dir` inside `dst_dir`.
 
-    Automatically dispatches to spatial AEQD/isometry perturbations for geospatial workspaces,
-    or tabular shuffle/column-reorder/unused-NaN-column perturbations for general CSV workspaces.
+    Automatically dispatches to spatial AEQD/isometry perturbations for vector and/or GeoTIFF
+    geospatial workspaces, or tabular shuffle/column-reorder/unused-NaN-column perturbations
+    for general CSV workspaces.
     """
     dst_dir.mkdir(parents=True, exist_ok=True)
     layers = _load_workspace_layers(src_dir)
-    if not layers:
+    rasters = sorted(p for p in src_dir.iterdir() if p.is_file() and p.suffix.lower() in RASTER_EXTS)
+    if not layers and not rasters:
         return _perturb_tabular_workspace(src_dir, dst_dir, shuffle_rows=shuffle_rows, seed=seed)
 
     # Copy any non-spatial auxiliary files verbatim.
     for p in src_dir.iterdir():
-        if p.is_file() and p.suffix.lower() not in SPATIAL_EXTS:
+        if p.is_file() and p.suffix.lower() not in (SPATIAL_EXTS | RASTER_EXTS):
             shutil.copy2(p, dst_dir / p.name)
 
-    all_bounds = np.array([g.total_bounds for _, _, g, _ in layers])
+    # Compute spherical circular centroid (exact across antimeridian and for raster-only workspaces)
+    xs_u, ys_u, zs_u = [], [], []
+    wgs_bounds = []
+    for _, _, g, _ in layers:
+        if not g.empty:
+            wgs_bounds.append(g.total_bounds)
+            pts = g.geometry.representative_point()
+            rlon = np.deg2rad(pts.x.to_numpy(dtype=float))
+            rlat = np.deg2rad(pts.y.to_numpy(dtype=float))
+            clat = np.cos(rlat)
+            xs_u.append(float(np.mean(clat * np.cos(rlon))))
+            ys_u.append(float(np.mean(clat * np.sin(rlon))))
+            zs_u.append(float(np.mean(np.sin(rlat))))
+    if rasters:
+        import rasterio
+        for rp in rasters:
+            with rasterio.open(rp) as src:
+                b = src.bounds
+                tr4326 = Transformer.from_crs(src.crs, "EPSG:4326", always_xy=True)
+                l_lo, b_lo = tr4326.transform(b.left, b.bottom)
+                r_hi, t_hi = tr4326.transform(b.right, b.top)
+                wgs_bounds.append(np.array([min(l_lo, r_hi), min(b_lo, t_hi), max(l_lo, r_hi), max(b_lo, t_hi)]))
+                clon, clat_d = tr4326.transform(0.5 * (b.left + b.right), 0.5 * (b.bottom + b.top))
+                rlon, rlat = np.deg2rad(clon), np.deg2rad(clat_d)
+                xs_u.append(float(np.cos(rlat) * np.cos(rlon)))
+                ys_u.append(float(np.cos(rlat) * np.sin(rlon)))
+                zs_u.append(float(np.sin(rlat)))
+
+    all_bounds = np.array(wgs_bounds)
     minx, miny = float(all_bounds[:, 0].min()), float(all_bounds[:, 1].min())
     maxx, maxy = float(all_bounds[:, 2].max()), float(all_bounds[:, 3].max())
-    cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
-    span_lon, span_lat = maxx - minx, maxy - miny
-    is_large = max(span_lon, span_lat) >= 5.0
+    mx, my, mz = float(np.mean(xs_u)), float(np.mean(ys_u)), float(np.mean(zs_u))
+    cy = float(np.degrees(np.arctan2(mz, np.hypot(mx, my))))
+    cx = float(np.degrees(np.arctan2(my, mx)))
+    span_lon = maxx - minx
+    span_lat = maxy - miny
+    # Antimeridian wraparound (span_lon > 180) is still a local dataset!
+    if span_lon > 180.0:
+        span_lon = 360.0 - span_lon
+    is_large = (not rasters) and (max(span_lon, span_lat) >= 5.0)
 
     rng = np.random.default_rng(seed)
 
@@ -284,5 +407,19 @@ def perturb_workspace(
         else:
             g_new.to_file(out_path, driver="GeoJSON")
 
-    meta["files"] = len(transformed)
+    if rasters:
+        raster_meta = {}
+        for rp in rasters:
+            raster_meta[rp.name] = _relocate_geotiff(
+                rp,
+                dst_dir / rp.name,
+                src_lat=cy,
+                src_lon=cx,
+                target_lat=target_lat,
+                target_lon=target_lon,
+                flip_crs_and_nodata=flip_gpkg_crs,
+            )
+        meta["rasters"] = raster_meta
+
+    meta["files"] = len(transformed) + len(rasters)
     return meta

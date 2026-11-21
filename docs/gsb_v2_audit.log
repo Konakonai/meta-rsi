@@ -1,0 +1,22 @@
+family                                 n reference_p    utm_pass webmercator wm_low_pass webmercator naive_nodat
+----------------------------------------------------------------------------------------------------------------
+area_weighted_pop_filter             120         120           0           0         113         113           0
+buffer_exclusion_area                120         120           0           0         120         120           0
+clipped_road_density                 120         120           0           0         120         120           0
+covered_pop_dedup                    120         120           0           0         118         118           0
+district_mean_zero_trap_v2           120         120           0         120         120           0           0
+dual_buffer_overlap_pop               30          30           0           0          29          29           0
+large_max_geodesic_span               30          30           0           0          28          28           0
+large_region_area_v2                 120         120           0           0          44          44           0
+large_route_length_v2                120         120           0           0         111         111           0
+multi_ring_density                   120         120           0           0          92          92           0
+nearest_service_gap                  120         120           0           0         120         120           0
+raster_buffer_extract                120         120           0           0         120         120         120
+raster_corridor_elevation             30          30           0           0          30          30          30
+raster_hotspot_in_buffer              30          30           0           0          28          28          30
+raster_pop_exposure                  120         120           0           0         119         119         120
+raster_slope_exceed_area             120         120           0           0         105         105         120
+raster_threshold_area                120         120           0           0          92          92         120
+raster_zonal_mean                    120         120           0           0         120         120         120
+topological_containment_v2           120         120           0         119         120           1           0
+weighted_accessibility_ratio          30          30           0           0          30          30           0
