@@ -33,7 +33,38 @@ Long-term project documentation lives under `docs/`:
 | **`metamorphic` (Ours)** | 4 | 80.6 ± 2.3% | **77.8 ± 3.9%** | **2.8 ± 5.6%** | **78.4 ± 3.8%** | **73.8 ± 4.9%** | **92.5 ± 5.1%** | **2.1 ± 1.8%** | 8.9 ± 3.0% | 1.50 | **0/4** |
 
 - Best evolved 4B no-think harness (`v3_gis_s2_meta`, `1.29` calls/task) reaches **81.9% ALL / 99.2% Held-out (119/120) / 1.0% lucky**, outperforming zero-shot thinking `gemma-4-26B-A4B-it` (`71.7%` ALL / `13.4%` lucky) by **+10.2%** and `Qwen3.8-27B` (`62.2%`) by **+19.7%** on the exact same 480 tasks.
-- On the **Polar OOD stress test** (`n=440` local tasks at `86.5°N / -85.5°S`, where `estimate_utm_crs()` raises `RuntimeError`), `metamorphic` fails **loudly** (`83.7%` Error, `2.7%` silent wrong) rather than returning silent distorted numbers (`Gen-0 Seed`: `65.9%` silent `Lucky+SilW`; `preserve`: `42.5%`), motivating self-discovered polar/AEQD operators in Phase P1 (full breakdown in [docs/RESEARCH.md](docs/RESEARCH.md)).
+- On the **Polar OOD stress test** (`n=440` local tasks at `86.5°N / -85.5°S`, where `estimate_utm_crs()` raises `RuntimeError`), `metamorphic` fails **loudly** (`83.7%` Error, `2.7%` silent wrong) rather than returning silent distorted numbers (`Gen-0 Seed`: `65.9%` silent `Lucky+SilW`; `preserve`: `42.5%`).
+
+## Verified Results (v0.3–v0.5, Audited `usage.errors == 0`)
+
+Full tables, paired statistics, and audit notes live in [docs/RESEARCH.md](docs/RESEARCH.md).
+
+### 1. Zero-Leakage Ablation & Non-Evolution Baselines (`GSB v1`, `n=480`, E4B no-think)
+- **Non-evolution baselines**: 15-minute expert `handcrafted.py` scores `74.2%` ALL (`1.51` calls); inference-time `runtime_meta.py` scores `70.0%` ALL (`2.12` calls).
+- **Controlled 3-seed ablation** (`--minimal-meta-prompt`, soft regression $\delta=0.14$): the pure binary invariance gate (`meta_gate_only`, **zero metamorphic diagnostic text**) reaches **`80.8 ± 2.0%`** (Held-out `93.6%`, Lucky `4.1%`), beating soft regression `darwinx_soft` (`76.9 ± 1.1%`) on **3/3 seeds** and `handcrafted.py` by `+6.6 pp`. Under a stricter weak proxy (`|lat| ≤ 2.2°`, seed 1), `darwinx_soft` locks in at `35.0%` (`32.5%` lucky) vs. `meta_neutral` at **`79.4%`** (`2.3%` lucky).
+- **Direct GRPO on E4B (60 steps, 1,920 rollouts)**: `GRPO-Weak` increases unseen spurious passes (`31.2% → 38.3%`) while degrading held-out accuracy (`27.5% → 24.2%`); `GRPO-Metamorphic` blocks `389/1,920` shortcuts (`29.8%` lucky) but exposes a sparse-reward exploration bottleneck from scratch (`27.1%` ALL).
+
+### 2. 100% Open-Weight Two-Timescale RSI (`gemma-4-26B-A4B-it`, `GSB v1`, `n=480`)
+Single complete closed-loop run using zero closed APIs, zero 3-location oracle labels in training/evolution, and strictly disjoint dev / distillation / test splits (`runs/v5_two_timescale/`):
+
+| Stage | Model Weights | Eval Harness | Calls | **Test ALL (`n=480`)** | **Held-out (`n=120`)** | **`Lucky`** | **`Err`** |
+|---|---|---|---:|---:|---:|---:|---:|
+| Gen-0 Baseline | Base 26B | Bare `seed.py` | 1.00 | 36.5% | 29.2% | 39.2% | 4.8% |
+| Weak Distillation (`SFT-Weak`) | `sft_weak` LoRA | Bare `seed.py` | 1.00 | **22.5%** | 13.3% | **59.0%** | 0.8% |
+| Stage 1 (`SFT-Meta`) | `sft_meta` LoRA | Bare `seed.py` | 1.00 | **88.3%** | 95.8% | **1.0%** | 6.7% |
+| Stage 2 (`+GRPO-Meta`, 24 steps) | `grpo_meta_final` | Bare `seed.py` | 1.00 | **92.1%** | **97.5%** | **0.4%** | 3.8% |
+| Gen-2 Compounding RSI | `grpo_meta_final` | Generic error-retry harness | 1.09 | **93.3%** | **98.3%** | **0.4%** | **0.4%** |
+
+*(Under symmetric open-weight harness evolution on 26B-A4B, weak `darwinx_soft` degraded `2/2` seeds to `20.0% / 20.4%` by writing `EPSG:3857` into its own prompt; `meta_neutral` teacher seed 1 reached `86.2%`, while seed 0 reached `42.7%`.)*
+
+### 3. Multi-Modal `GSB v2` (6 Seeds, `n=450`) & Real OpenStreetMap Urban Transfer (`n=24`)
+- **6-seed `GSB v2` lock-in matrix** (1,950 polar/antimeridian/GeoTIFF raster tasks, symmetric `26B-A4B`):
+  - Base `seed.py`: `30.7%` (`44.4%` lucky); static `handcrafted.py`: `35.1%` (`49.6%` error).
+  - `darwinx_soft` (weak `dev_low`, 6 seeds): **`31.9 ± 1.2%`** (`50.3 ± 3.6%` lucky) — **6/6 locked in**.
+  - `meta_T0` (fixed mid-latitude probe, 6 seeds): **`23.6 ± 5.2%`** (`41.2 ± 25.3%` error) — **6/6 second-order UTM lock-in** at poles/antimeridian.
+  - `llm_judge` (static rubric, 6 seeds): **`39.5 ± 14.4%`** (`19.1%–56.2%`).
+  - Self-certified verifier co-evolution broke seed 0 out to **`62.9%`** (vs. `oracle_soft` `55.3%` and `runtime_meta` `57.1%`); multi-seed tip-only restart showed verifier-upgrade hysteresis (`37.1 ± 17.7%`), and archive-preserving co-evolution + fixed cross-domain `SciUnits` runs are queued in Wave 1C (see [docs/RESEARCH.md](docs/RESEARCH.md)).
+- **Zero-shot real OpenStreetMap 4-city transfer** (`data/osm_eval/`, 24 tasks across Singapore `1.29°N`, Xuzhou `34.26°N`, Helsinki `60.17°N`, Tromsø `69.65°N`): `seed.py` `41.7%` → weak `darwinx_soft` **`29.2%`** (Singapore `6/6`, Helsinki `0/6`, Tromsø `0/6`, `70.8%` silent wrong) → `stage1_T0` `95.8%` → seed-0 `stage2_coev` **`100.0%` (24/24)**.
 
 ## Repository Layout
 
