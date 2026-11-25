@@ -63,3 +63,45 @@ def test_summarize_pairs_seeds_tasks_and_protocols(tmp_path):
     assert rv["pairs"] == 1 and rv["mean_task_flip_rate"] == pytest.approx(0.1)
     out = render(rep)
     assert "Seed 0 minus the mean of seeds 1-5" in out and "reused 10.0 pp (n=1)" in out
+
+
+def test_amended_rule_confirmatory_t_intervals_and_rep1_drop(tmp_path):
+    """Addendum 2: one confirmatory comparison, t5 intervals, and the reused-rep-1 drop rule."""
+    (tmp_path / "evals").mkdir()
+    entries = []
+    for method, n_ok in (("arch_coev", 7), ("naive", 4), ("darwinx_soft", 4)):
+        for s in SEEDS:
+            tag = f"{method}_s{s}"
+            reused = method == "naive" and s > 0
+            entries.append({"tag": tag, "method": method, "seed": s, "orig_correct": 0.4, "reused_A_rep1": reused})
+            k = n_ok - (1 if (method == "arch_coev" and s == 1) else 0)  # arch_coev wins by 3 or 2 tasks per seed
+            cats = ["correct"] * k + ["silent_wrong"] * (N_TASKS - k)
+            # reused repeat 1 is inflated by 3 tasks (backend drift); repeat 2 matches the fresh harnesses
+            r1 = (["correct"] * (k + 3) + ["silent_wrong"] * (N_TASKS - k - 3)) if reused else cats
+            (tmp_path / "evals" / f"{tag}_A_rep1.json").write_text(json.dumps(_eval(r1)))
+            (tmp_path / "evals" / f"{tag}_A_rep2.json").write_text(json.dumps(_eval(cats)))
+            if s == 0:  # Protocol B on a 4-task subset
+                (tmp_path / "evals" / f"{tag}_B_rep1.json").write_text(json.dumps(_eval(cats[:4])))
+    (tmp_path / "manifest.json").write_text(json.dumps({"entries": entries, "missing": []}))
+
+    rep = summarize(tmp_path, ref="naive", n_boot=200)
+    bc = rep["backend_check"]
+    assert bc["reused"]["n"] == 5 and bc["reused"]["signed_mean"] == pytest.approx(0.3)
+    assert bc["fresh_single_call"]["n"] == 7 and bc["drop_reused_rep1"] and bc["applied"]
+    assert rep["methods"]["naive"]["A"]["correct"]["mean"] == pytest.approx(0.4)  # inflated rep 1 dropped
+    row = next(r for r in rep["vs_ref"]["A"]["rows"] if r["method"] == "arch_coev")
+    assert row["confirmatory"] and row["established"]  # 6/6 seeds positive: p = 2/64
+    assert row["diff"] == pytest.approx((5 * 0.3 + 0.2) / 6)
+    lo, hi = row["t_ci95"]
+    blo, bhi = row["t_ci_bonf"]
+    assert blo < lo < row["diff"] < hi < bhi
+    other = next(r for r in rep["vs_ref"]["A"]["rows"] if r["method"] == "darwinx_soft")
+    assert not other["confirmatory"] and not other["established"]
+    # the first 4 tasks are the easy ones here: the B subset overstates naive (1.0 vs 0.4 on all tasks)
+    assert rep["methods"]["naive"]["A"]["A_on_B_subset"] == pytest.approx(1.0)
+    assert rep["methods"]["naive"]["A"]["silent_failure"]["mean"] == pytest.approx(0.6)
+
+    kept = summarize(tmp_path, ref="naive", n_boot=200, drop_reused_rep1=False)
+    assert not kept["backend_check"]["applied"]
+    assert kept["methods"]["naive"]["A"]["correct"]["mean"] == pytest.approx((0.4 + 5 * 0.55) / 6)
+    assert "(confirmatory: established)" in render(rep)

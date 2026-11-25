@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import threading
@@ -28,11 +29,24 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from benchmarks.gsb.harness import matches, run_variant  # noqa: E402
-from meta_rsi.eval.unified_summary import hier_bootstrap_ci, holm, sign_flip_p  # noqa: E402
+from meta_rsi.eval.unified_summary import BONF_K, hier_bootstrap_ci, holm, sign_flip_p, t_interval  # noqa: E402
 
 _CODE_RE = re.compile(r"^(?P<tag>.+)_A_rep(?P<rep>\d+)\.code\.jsonl$")
 BANDS = ("0-30", "30-60", "60-80", "80-89", "large")
 LAT_DIST_BINS = ((0.0, 5.0), (5.0, 15.0), (15.0, 90.0))  # |lat - nearest relocating-probe latitude|, degrees
+# Addendum 2: the probes' failure mechanisms are hemisphere-symmetric, so also bin by distance in |latitude|
+PROBE_ABS_LATS = (58.3, 56.2, 86.0)
+DOMAINS = ("equatorial", "utm_valid", "polar")  # |lat| <= 8; inside UTM's 84N / 80S limits; beyond them
+
+
+def abs_lat_dist(lat: float) -> float:
+    return min(abs(abs(lat) - p) for p in PROBE_ABS_LATS)
+
+
+def domain(lat: float) -> str:
+    if abs(lat) <= 8.0:
+        return "equatorial"
+    return "polar" if (lat > 84.0 or lat < -80.0) else "utm_valid"
 
 
 def blind_path(code_file: Path) -> Path:
@@ -101,7 +115,7 @@ def _lat_bin(d: float) -> str:
     return f"{LAT_DIST_BINS[-1][0]:g}-{LAT_DIST_BINS[-1][1]:g}"
 
 
-def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dict:
+def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_reused_rep1: bool = False) -> dict:
     blind = load_blind(root)
     manifest = json.loads((out / "manifest.json").read_text())
     tag_info = {e["tag"]: e for e in manifest["entries"]}
@@ -114,6 +128,10 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
         s = ["all", f"band:{v['band']}"]
         if not task["large"]:
             s.append(f"probe_lat_dist:{_lat_bin(v['probe_lat_dist'])}")
+            s.append(f"abs_lat_dist:{_lat_bin(abs_lat_dist(v['lat']))}")
+            s.append(f"domain:{domain(v['lat'])}")
+            if v.get("crosses_antimeridian"):
+                s.append("domain:antimeridian")
         return s
 
     # per (method, seed): list over repeats of {stratum: (n_tasks,) share correct, NaN where the task has none}
@@ -123,6 +141,8 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
         if not m or m["tag"] not in tag_info:
             continue
         e = tag_info[m["tag"]]
+        if drop_reused_rep1 and e.get("reused_A_rep1") and m["rep"] == "1":
+            continue  # pre-registered backend drop rule (decided by unified_summary's backend_check)
         num: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(len(task_ids)))
         den: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(len(task_ids)))
         for rec in json.loads(f.read_text())["records"]:
@@ -131,6 +151,9 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
                 for s in strata(t, vn):
                     num[s][tidx[rec["task_id"]]] += x["correct"]
                     den[s][tidx[rec["task_id"]]] += 1
+                w = math.cos(math.radians(t["variants"][vn]["lat"]))  # area weight: undoes the band quotas
+                num["all_cosw"][tidx[rec["task_id"]]] += w * x["correct"]
+                den["all_cosw"][tidx[rec["task_id"]]] += w
         # the same scripts on the designed non-low variants (high / polar / antimeridian / mid / zone_edge)
         ev = f.with_name(f.name.replace(".blind.json", ".json"))
         if ev.exists():
@@ -150,7 +173,7 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
         return {seed: np.nanmean(np.stack([r[s] for r in reps if s in r]), axis=0)
                 for (mm, seed), reps in per.items() if mm == method and any(s in r for r in reps)}
 
-    rep = {"blind_root": str(root), "methods": {}, "vs_ref": {}}
+    rep = {"blind_root": str(root), "drop_reused_rep1": drop_reused_rep1, "methods": {}, "vs_ref": {}}
     for mth in methods:
         rep["methods"][mth] = {}
         for s in all_strata:
@@ -172,11 +195,13 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
             diffs = [float(np.mean(x1[i, ok] - x2[i, ok])) for i in range(len(seeds))]
             row = {"method": mth, "seeds": seeds, "diff": float(np.mean(diffs)), "per_seed_diff": diffs,
                    "sign_flip_p": sign_flip_p(diffs),
+                   "t_ci95": t_interval(diffs), "t_ci_bonf": t_interval(diffs, 1 - 0.05 / BONF_K),
                    "boot_ci95": hier_bootstrap_ci(x1[:, ok], x2[:, ok], fam[ok], n_boot=n_boot)}
             # where the difference lives: per stratum, seed-paired mean difference + 95% hierarchical bootstrap CI
             row["by_stratum"] = {}
             row["by_stratum_ci95"] = {}
             row["by_stratum_p"] = {}
+            row["by_stratum_t95"] = {}
             for s in all_strata:
                 sa, sb = seed_matrix(mth, s), seed_matrix(ref, s)
                 ss = sorted(set(sa) & set(sb))
@@ -188,6 +213,7 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
                     s_diffs = [float(np.mean(s_x1[i, s_ok] - s_x2[i, s_ok])) for i in range(len(ss))]
                     row["by_stratum"][s] = float(np.mean(s_diffs))
                     row["by_stratum_p"][s] = sign_flip_p(s_diffs)
+                    row["by_stratum_t95"][s] = t_interval(s_diffs)
                     row["by_stratum_ci95"][s] = hier_bootstrap_ci(s_x1[:, s_ok], s_x2[:, s_ok], fam[s_ok], n_boot=n_boot)
             rows.append(row)
         for r, p in zip(rows, holm([r["sign_flip_p"] for r in rows])):
@@ -197,24 +223,30 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
 
 
 def render(rep: dict) -> str:
-    cols = ["designed", "all"] + [f"band:{b}" for b in BANDS] + [f"probe_lat_dist:{lo:g}-{hi:g}" for lo, hi in LAT_DIST_BINS]
+    bins = [f"{lo:g}-{hi:g}" for lo, hi in LAT_DIST_BINS]
+    cols = (["designed", "all", "all_cosw"] + [f"band:{b}" for b in BANDS] + [f"probe_lat_dist:{b}" for b in bins]
+            + [f"abs_lat_dist:{b}" for b in bins] + [f"domain:{d}" for d in DOMAINS])
     lines = ["Blind-variant accuracy (share of scored blind variants correct; mean over seeds). `designed`: the same",
-             "scripts on the designed non-low variants; `all`: every scored blind variant, then by band and by",
-             "|latitude - nearest relocating-probe latitude| (local families)",
-             f"{'method':16s} " + " ".join(f"{c.split(':')[-1]:>9s}" for c in cols)]
+             "scripts on the designed non-low variants; `all`: every scored blind variant; `all_cosw`: weighted by",
+             "cos(latitude); then by band, by signed (`sig`) and |lat| (`abs`) distance to the nearest relocating-probe",
+             "latitude, and by mechanism domain (local families). Drop reused rep 1: " + str(rep.get("drop_reused_rep1")),
+             f"{'method':16s} " + " ".join(f"{(c.split(':')[0][:3] + ':' if 'dist' in c else '') + c.split(':')[-1]:>11s}" for c in cols)]
     for m, d in rep["methods"].items():
-        lines.append(f"{m:16s} " + " ".join(f"{100 * d[c]['mean']:8.1f}%" if c in d else f"{'-':>9s}" for c in cols))
+        lines.append(f"{m:16s} " + " ".join(f"{100 * d[c]['mean']:10.1f}%" if c in d else f"{'-':>11s}" for c in cols))
     for ref, rows in rep["vs_ref"].items():
-        lines.append(f"\nvs {ref}: seed-paired difference (pp), sign-flip p, Holm p, 95% hierarchical bootstrap")
+        lines.append(f"\nvs {ref} (descriptive): seed-paired difference (pp), sign-flip p, Holm p, t5 95%, "
+                     f"t5 Bonferroni/{BONF_K}, bootstrap seeds x families")
         for r in rows:
             lo, hi = r["boot_ci95"]
+            (tl, th), (bl, bh) = r["t_ci95"], r["t_ci_bonf"]
             far_str = ""
-            if "probe_lat_dist:15-90" in r.get("by_stratum_ci95", {}):
-                flo, fhi = r["by_stratum_ci95"]["probe_lat_dist:15-90"]
-                fdiff = r["by_stratum"]["probe_lat_dist:15-90"]
-                far_str = f"  | >=15deg: {100 * fdiff:+.1f} [{100 * flo:+.1f}, {100 * fhi:+.1f}]"
+            for key, lab in (("probe_lat_dist:15-90", ">=15deg"), ("abs_lat_dist:15-90", "|lat|>=15deg")):
+                if key in r.get("by_stratum_t95", {}):
+                    flo, fhi = r["by_stratum_t95"][key]
+                    far_str += f"  | {lab}: {100 * r['by_stratum'][key]:+.1f} [{100 * flo:+.1f}, {100 * fhi:+.1f}]"
             lines.append(f"  {r['method']:16s} {100 * r['diff']:+6.1f}  p={r['sign_flip_p']:.3f}  holm={r['holm_p']:.3f}  "
-                         f"[{100 * lo:+.1f}, {100 * hi:+.1f}]  n_seeds={len(r['seeds'])}{far_str}")
+                         f"t[{100 * tl:+.1f}, {100 * th:+.1f}]  bonf[{100 * bl:+.1f}, {100 * bh:+.1f}]  "
+                         f"boot[{100 * lo:+.1f}, {100 * hi:+.1f}]  n_seeds={len(r['seeds'])}{far_str}")
     return "\n".join(lines)
 
 
@@ -229,11 +261,19 @@ def main() -> None:
     m = sub.add_parser("summary")
     m.add_argument("--refs", default="naive,arch_coev")
     m.add_argument("--n-boot", type=int, default=4000)
+    m.add_argument("--drop-reused-rep1", choices=("auto", "yes", "no"), default="auto",
+                   help="auto: follow backend_check in <out>/unified_summary.json (run unified_summary first)")
     a = ap.parse_args()
     if a.cmd == "score":
         cmd_score(a)
     else:
-        rep = summarize(Path(a.out), Path(a.blind), a.refs.split(","), a.n_boot)
+        drop = a.drop_reused_rep1 == "yes"
+        if a.drop_reused_rep1 == "auto":
+            us = Path(a.out) / "unified_summary.json"
+            if not us.exists():
+                raise SystemExit(f"{us} missing: run `python -m meta_rsi.eval.unified_summary {a.out}` first, or pass --drop-reused-rep1")
+            drop = bool(json.loads(us.read_text())["backend_check"]["applied"])
+        rep = summarize(Path(a.out), Path(a.blind), a.refs.split(","), a.n_boot, drop_reused_rep1=drop)
         (Path(a.out) / "blind_summary.json").write_text(json.dumps(rep, indent=2))
         print(render(rep))
 

@@ -5,8 +5,10 @@ averaged over its repeats), the lucky / silent-wrong / error shares, and the shi
 Protocol A vs B: what live deployment (B) does to the tasks Protocol A scored correct, lucky or silent-wrong.
 Each method against a reference (default arch_coev): the seed-paired difference, an exact sign-flip test over
 seeds (Holm-adjusted across methods), and a 95% interval from a bootstrap that resamples seeds (paired) and
-task families. With 6 seeds the smallest two-sided sign-flip p is 2/64 = 0.031, so the seed-level test alone
-cannot survive a multiplicity correction; read the bootstrap interval alongside it.
+task families. Decision rule (docs/BLIND_PROTOCOL.md, Addendum 2): the only confirmatory comparison is
+arch_coev - naive under Protocol A, established iff the exact sign-flip p < 0.05 (all 6 seeds agree); every other
+comparison is descriptive, with t5 intervals on the seed-level differences (95% and Bonferroni over BONF_K) and the
+seeds x families bootstrap as a descriptive interval.
 
     python -m meta_rsi.eval.unified_summary runs/v10_unified_6seed [--ref arch_coev]
 """
@@ -20,8 +22,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
+from scipy import stats as _st
 
 CATS = ("correct", "lucky", "silent_wrong", "error")
+CONFIRMATORY = ("arch_coev", "naive")  # (method, reference): the one pre-registered confirmatory comparison
+BONF_K = 14  # primary-outcome comparisons: 7 methods vs naive + 7 vs arch_coev
+SINGLE_CALL = {"naive", "meta_gate_only", "oracle_soft", "darwinx_soft", "meta_T0"}  # backend-check comparison group
 _EVAL_RE = re.compile(r"^(?P<tag>.+)_(?P<proto>[AB])_rep(?P<rep>\d+)\.json$")
 
 
@@ -29,8 +35,8 @@ def _cat(c: str | None) -> str:
     return c if c in CATS else "error"  # no_code / missing count as error, as in eval_test's rates()
 
 
-def load_runs(out: Path) -> tuple[dict, dict[tuple[str, str], list[dict[str, dict]]]]:
-    """manifest, and {(tag, protocol): [ {task_id: record} per clean repeat, in rep order ]}."""
+def load_runs(out: Path, with_reps: bool = False):
+    """manifest, {(tag, protocol): [ {task_id: record} per clean repeat, in rep order ]} (and the rep numbers)."""
     manifest = json.loads((out / "manifest.json").read_text())
     tags = {e["tag"] for e in manifest["entries"]}
     found: dict[tuple[str, str], list[tuple[int, dict]]] = defaultdict(list)
@@ -43,7 +49,45 @@ def load_runs(out: Path) -> tuple[dict, dict[tuple[str, str], list[dict[str, dic
         if int((d.get("usage") or {}).get("errors", 1)) != 0 or not recs or len(recs) != d["ALL"]["n"]:
             continue  # unfinished or backend errors: `run` redoes these
         found[(m["tag"], m["proto"])].append((int(m["rep"]), {r["task_id"]: r for r in recs}))
-    return manifest, {k: [recs for _, recs in sorted(v, key=lambda x: x[0])] for k, v in found.items()}
+    runs = {k: [recs for _, recs in sorted(v, key=lambda x: x[0])] for k, v in found.items()}
+    if with_reps:
+        return manifest, runs, {k: sorted(r for r, _ in v) for k, v in found.items()}
+    return manifest, runs
+
+
+def t_interval(diffs: list[float], level: float = 0.95) -> tuple[float, float]:
+    """Two-sided t interval for the mean of seed-level paired differences (df = n - 1)."""
+    d = np.asarray(diffs, dtype=float)
+    if len(d) < 2:
+        return float("nan"), float("nan")
+    half = _st.t.ppf(0.5 + level / 2, len(d) - 1) * d.std(ddof=1) / np.sqrt(len(d))
+    return float(d.mean() - half), float(d.mean() + half)
+
+
+def _share_correct(recs: dict[str, dict], tids) -> float:
+    return float(np.mean([_cat(recs[t]["category"]) == "correct" for t in tids]))
+
+
+def backend_check(entries: list[dict], runs: dict, rep_ids: dict) -> dict:
+    """Pre-registered drop rule for reused Protocol A repeat 1 (Addendum 2, item 4)."""
+    groups: dict[str, list[float]] = {"reused": [], "fresh_single_call": []}
+    for e in entries:
+        k = (e["tag"], "A")
+        if rep_ids.get(k, [])[:2] != [1, 2]:
+            continue
+        r1, r2 = runs[k][0], runs[k][1]
+        common = sorted(set(r1) & set(r2))
+        g = _share_correct(r1, common) - _share_correct(r2, common)
+        if e.get("reused_A_rep1"):
+            groups["reused"].append(g)
+        elif e["method"] in SINGLE_CALL:
+            groups["fresh_single_call"].append(g)
+    out = {k: {"n": len(v), "signed_mean": float(np.mean(v)) if v else None,
+               "abs_mean": float(np.mean(np.abs(v))) if v else None} for k, v in groups.items()}
+    ru, fr = out["reused"], out["fresh_single_call"]
+    drop = bool(ru["n"] and fr["n"] and ((ru["abs_mean"] - fr["abs_mean"]) > 0.02 or abs(ru["signed_mean"]) > 0.02))
+    out["drop_reused_rep1"] = drop
+    return out
 
 
 def sign_flip_p(diffs: list[float]) -> float:
@@ -84,9 +128,16 @@ def hier_bootstrap_ci(x1: np.ndarray, x2: np.ndarray, fam: np.ndarray, n_boot: i
     return float(lo), float(hi)
 
 
-def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
-    manifest, runs = load_runs(out)
+def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000, drop_reused_rep1: bool | None = None) -> dict:
+    manifest, runs, rep_ids = load_runs(out, with_reps=True)
     entries = manifest["entries"]
+    bcheck = backend_check(entries, runs, rep_ids)
+    drop = bcheck["drop_reused_rep1"] if drop_reused_rep1 is None else drop_reused_rep1
+    if drop:  # every later analysis (A, A->B, repeats) then sees only repeats >= 2 of the reused harnesses
+        for e in entries:
+            k = (e["tag"], "A")
+            if e.get("reused_A_rep1") and rep_ids.get(k, [None])[0] == 1:
+                runs[k], rep_ids[k] = runs[k][1:], rep_ids[k][1:]
     methods = list(dict.fromkeys(e["method"] for e in entries))
     task_ids = sorted({tid for reps in runs.values() for recs in reps for tid in recs})
     fam_of = {tid: recs[tid]["family"] for reps in runs.values() for recs in reps for tid in recs}
@@ -108,7 +159,10 @@ def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
             outm[e["seed"]] = v
         return outm
 
-    report: dict = {"n_tasks": len(task_ids), "n_families": int(len(np.unique(fam))), "methods": {}, "vs_ref": {}}
+    report: dict = {"n_tasks": len(task_ids), "n_families": int(len(np.unique(fam))), "methods": {}, "vs_ref": {},
+                    "backend_check": bcheck | {"applied": drop}}
+    b_tasks = sorted({t for (tag, proto), reps in runs.items() if proto == "B" for r in reps for t in r})
+    b_mask = np.array([t in set(b_tasks) for t in task_ids])
     for proto in ("A", "B"):
         for m in methods:
             per_cat = {c: matrix(m, proto, c) for c in CATS}
@@ -119,6 +173,10 @@ def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
             for c in CATS:
                 vals = [float(np.nanmean(per_cat[c][s])) for s in seeds]
                 row[c] = {"mean": float(np.mean(vals)), "sd": float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0, "per_seed": vals}
+            sil = [row["lucky"]["per_seed"][i] + row["silent_wrong"]["per_seed"][i] for i in range(len(seeds))]
+            row["silent_failure"] = {"mean": float(np.mean(sil)), "sd": float(np.std(sil, ddof=1)) if len(sil) > 1 else 0.0}
+            if proto == "A" and b_mask.any():  # is the 100-task Protocol B subset representative under Protocol A?
+                row["A_on_B_subset"] = float(np.mean([np.nanmean(per_cat["correct"][s][b_mask]) for s in seeds]))
             if proto == "A":
                 orig = {e["seed"]: e.get("orig_correct") for e in entries if e["method"] == m}
                 shift = [row["correct"]["per_seed"][i] - orig[s] for i, s in enumerate(seeds) if orig.get(s) is not None]
@@ -149,8 +207,11 @@ def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
                 x2 = np.stack([ref_m[s][keep] for s in common])
                 d = (x1.mean(axis=1) - x2.mean(axis=1)).tolist()
                 lo, hi = hier_bootstrap_ci(x1, x2, fam[keep], n_boot=n_boot)
+                conf = proto == "A" and (m, ref) in (CONFIRMATORY, CONFIRMATORY[::-1])
                 rows.append({"method": m, "n_seeds": len(common), "diff": float(np.mean(d)), "per_seed_diff": d,
-                             "sign_flip_p": sign_flip_p(d), "boot_ci95": [lo, hi]})
+                             "sign_flip_p": sign_flip_p(d), "boot_ci95": [lo, hi],
+                             "t_ci95": list(t_interval(d)), "t_ci_bonf": list(t_interval(d, 1 - 0.05 / BONF_K)),
+                             "confirmatory": conf, "established": bool(conf and sign_flip_p(d) < 0.05)})
                 ps.append(rows[-1]["sign_flip_p"])
             for r, p_adj in zip(rows, holm(ps)):
                 r["sign_flip_p_holm"] = p_adj
@@ -199,6 +260,8 @@ def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
             c = [np.mean([_cat(r[t]["category"]) == "correct" for t in common]) for r in reps[:2]]
             gaps["reused" if e.get("reused_A_rep1") else "fresh"].append(abs(c[0] - c[1]))
     report["rep_gap_A"] = {k: {"n": len(v), "mean_abs": float(np.mean(v)) if v else None} for k, v in gaps.items()}
+    g3 = [report["methods"].get(m, {}).get("A", {}).get("seed0_gap") for m in ("naive", "meta_gate_only", "oracle_soft")]
+    report["seed0_gap_mean_3"] = float(np.mean(g3)) if all(g is not None for g in g3) else None
     report["missing_harnesses"] = manifest.get("missing", [])
     return report
 
@@ -222,12 +285,16 @@ def render(rep: dict) -> str:
             lines.append(f"| {m} | {len(r['seeds'])} | " + " | ".join(cells) + " |" + extra)
         vs = rep["vs_ref"].get(proto)
         if vs:
-            lines += ["", f"Difference in correct vs `{vs['ref']}` (seed-paired):", "",
-                      "| method | seeds | diff (pp) | sign-flip p | Holm p | 95% CI seeds×families (pp) |", "|---|---|---|---|---|---|"]
+            lines += ["", f"Difference in correct vs `{vs['ref']}` (seed-paired; descriptive unless marked confirmatory):", "",
+                      f"| method | seeds | diff (pp) | sign-flip p | Holm p | t5 95% (pp) | t5 Bonferroni/{BONF_K} (pp) | bootstrap seeds×families (pp) |",
+                      "|---|---|---|---|---|---|---|---|"]
             for r in vs["rows"]:
                 lo, hi = r["boot_ci95"]
-                lines.append(f"| {r['method']} | {r['n_seeds']} | {100 * r['diff']:+.1f} | {r['sign_flip_p']:.3f} | "
-                             f"{r['sign_flip_p_holm']:.3f} | [{100 * lo:+.1f}, {100 * hi:+.1f}] |")
+                (tl, th), (bl, bh) = r["t_ci95"], r["t_ci_bonf"]
+                tag = " **(confirmatory: " + ("established" if r["established"] else "not established") + ")**" if r["confirmatory"] else ""
+                lines.append(f"| {r['method']}{tag} | {r['n_seeds']} | {100 * r['diff']:+.1f} | {r['sign_flip_p']:.3f} | "
+                             f"{r['sign_flip_p_holm']:.3f} | [{100 * tl:+.1f}, {100 * th:+.1f}] | [{100 * bl:+.1f}, {100 * bh:+.1f}] | "
+                             f"[{100 * lo:+.1f}, {100 * hi:+.1f}] |")
         lines.append("")
     if rep["a_to_b"]:
         lines += ["## Protocol A category -> share correct under live deployment (B)", "",
@@ -244,6 +311,17 @@ def render(rep: dict) -> str:
             sh = " / ".join(f"s{k}:{100 * v:+.1f}" for k, v in r["shift_per_seed"].items())
             lines.append(f"| {m} | {100 * r['seed0_gap']:+.1f} | {'n/a' if o is None else f'{100 * o:+.1f}'} | {sh} |")
         lines.append("")
+    if rep.get("seed0_gap_mean_3") is not None:
+        lines.append(f"Seed-0 gap, mean over naive / meta_gate_only / oracle_soft: {100 * rep['seed0_gap_mean_3']:+.1f} pp")
+    bc = rep.get("backend_check") or {}
+    if bc:
+        lines.append("Backend check (rep 1 - rep 2): " + ", ".join(
+            f"{k} n={v['n']} signed {100 * v['signed_mean']:+.1f} abs {100 * v['abs_mean']:.1f} pp"
+            for k, v in bc.items() if isinstance(v, dict) and v.get("n")) + f"; drop reused rep 1: {bc.get('applied')}")
+    sub = [(m, by_p["A"]) for m, by_p in rep["methods"].items() if "A_on_B_subset" in by_p.get("A", {})]
+    if sub:
+        lines.append("Protocol A on the Protocol B subset vs all tasks: " + ", ".join(
+            f"{m} {100 * r['A_on_B_subset']:.1f} vs {100 * r['correct']['mean']:.1f}" for m, r in sub))
     rg = rep.get("rep_gap_A") or {}
     if any(v["n"] for v in rg.values()):
         lines.append("Protocol A |rep 1 - rep 2|: " + ", ".join(

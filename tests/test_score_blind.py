@@ -16,6 +16,7 @@ _spec.loader.exec_module(score_blind)
 
 BANDS = ["0-30", "0-30", "30-60", "30-60", "60-80", "60-80", "80-89", "80-89"]
 LAT_DIST = [40.0, 30.0, 20.0, 2.0, 1.0, 10.0, 3.0, 25.0]
+LATS = [5.0, 20.0, 40.0, 57.0, -61.0, 70.0, -85.0, 86.5]  # domains: equatorial, 5 x utm_valid, 2 x polar
 
 
 def test_sidecar_names():
@@ -30,7 +31,7 @@ def test_summary_pairs_seeds_and_splits_by_stratum(tmp_path):
     root.mkdir()
     tasks = []
     for i in range(4):
-        variants = {f"b{k}": {"dir": f"t{i}/b{k}", "band": BANDS[k], "probe_lat_dist": LAT_DIST[k], "truth": 1.0,
+        variants = {f"b{k}": {"dir": f"t{i}/b{k}", "band": BANDS[k], "probe_lat_dist": LAT_DIST[k], "lat": LATS[k], "truth": 1.0,
                               "scored": not (i == 0 and k == 7)} for k in range(8)}
         tasks.append({"task_id": f"t{i}", "family": f"f{i // 2}", "answer": "real", "large": False, "variants": variants})
     (root / "tasks.jsonl").write_text("".join(json.dumps(t) + "\n" for t in tasks))
@@ -71,3 +72,9 @@ def test_summary_pairs_seeds_and_splits_by_stratum(tmp_path):
     assert far_lo <= row["by_stratum"]["probe_lat_dist:15-90"] <= far_hi
     rendered = score_blind.render(rep)
     assert "Blind-variant accuracy" in rendered and ">=15deg:" in rendered
+    # Addendum 2 strata: mechanism domains and |lat| distance; `ref` solves only |lat| < 60
+    assert row["by_stratum"]["domain:equatorial"] == 0.0 and row["by_stratum"]["domain:polar"] == 1.0
+    # |lat| distance 0-5: b3 (57), b4 (-61), b6 (-85), b7 (86.5); ref solves b3 only (t0 has no b7)
+    assert row["by_stratum"]["abs_lat_dist:0-5"] == pytest.approx(1 - (1 / 3 + 3 * 0.25) / 4)
+    assert "all_cosw" in rep["methods"]["ref"] and "t_ci_bonf" in row
+    assert "domain:polar" in row["by_stratum_t95"]
