@@ -79,7 +79,7 @@ def evaluate_gate(
         )
 
     if gate_mode in ("darwinx_soft", "meta_soft", "meta_gate_only", "llm_judge", "oracle_soft"):
-        # True DarwinX-style soft bounded regression (arXiv:2608.07545 §2.1):
+        # Soft bounded-regression gating (inspired by DarwinX, arXiv:2608.07545):
         # Accept iff net gain g(c) = |newly_solved| - |regressed| > 0 AND regression fraction R(c) <= delta.
         # `meta_soft` / `meta_gate_only` / `llm_judge` / `oracle_soft` apply the EXACT SAME rule on their
         # respective filtered `solved_ids_in_loop`, isolating the verifier signal with zero gating confounder.

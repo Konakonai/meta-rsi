@@ -232,6 +232,39 @@ Key Wave S4-2 breakthroughs:
 2. **`+79.2 pp` Real-World OpenStreetMap Weight Separation**: With zero GIS prompt rules (`1.00` call), `SFT-Weak` collapses real 4-city OSM from `41.7% → 12.5%` (`0/6` Helsinki, `0/6` Tromsø, `70.8%` silent wrong), whereas `SFT-Meta` reaches `79.2%`, `GRPO-Meta` reaches **`91.7%` (22/24, `0.0%` Err)**, and Gen-2 Compounding hits **`100.0%` (24/24, `1.04` calls)**!
 3. **True Out-of-Distribution External Transfer (`GeoAnalystBench`)**: On completely unseen open-source `GeoAnalystBench` workflows (never seen in any training or evolution split), metamorphic weight internalization drives `dynamic_crs_vec` from **`0.0% → 71.4%`** (`+71.4 pp`), eliminates `EPSG:3857` (`5.9% → 0.0%`), and lifts `strict_geo_sound` from `76.5% → 88.2%` (`SFT-Meta`) / `82.3%` (`GRPO-Meta`) while `SFT-Weak` degrades Base 26B to `64.7%` (`-11.8 pp`, halving `raster_nodata_safe` `75.0% → 37.5%`).
 
+## 2.4 Metamorphic Gate False-Rejection Audit (`runs/v11_gate_precision/`, 2026-11-25)
+
+How often does the gate behind `base_meta`, `sft_meta` and `meta_gate_only` (built-in `shift_and_shuffle` and `crs_storage_flip` probes, then the 3 certified probes) reject a correct solution? Two CPU-only measurements, both re-running the exact `_run_metamorphic_check` used in collection and evolution (`scripts/rebuttal/gate_precision.py`, `scripts/rebuttal/gate_reference_osm.py`).
+
+### 1. Gate vs. oracle on unfiltered trajectories (GSB v2 `train[20:60]`, 1,384 scripts)
+
+Every script passed only the weak check (correct on `low`). Its gate verdict is compared with the oracle (correct on every hidden variant). The re-run reproduces the collection-time filter: all 35 `base_meta` scripts whose code is identical to a `base_weak` script pass, and 143 of the 149 `base_weak` scripts the gate passes belong to tasks that `base_meta` kept.
+
+| Trajectory source | Oracle-correct | False rejection, full gate | False rejection, built-in probes only | False acceptance, full gate | False acceptance, built-in only | Oracle-correct among passed |
+|---|---|---|---|---|---|---|
+| Bare 26B `seed.py` (`base_weak`) | 183/444 | 19.7% (36/183) | 7.1% (13/183) | 0.8% (2/261) | 3.8% (10/261) | 98.7% |
+| `stage2_coev` teacher (`same_teacher_weak`) | 400/447 | 5.8% (23/400) | 0.2% (1/400) | 8.5% (4/47) | 36.2% (17/47) | 99.0% |
+| `darwinx_soft` s0 teacher (Wave S4-2 `SFT-Weak` data) | 181/493 | 20.4% (37/181) | 6.6% (12/181) | 1.3% (4/312) | 4.2% (13/312) | 97.3% |
+
+- The certified probes trade false rejections for false acceptances: they cut false acceptance (36.2% → 8.5% for the strong teacher) and raise false rejection about 3× for the two weaker sources (7.1% → 19.7%, 6.6% → 20.4%) and from 0.2% to 5.8% for the strong teacher.
+- Three GSB v2 families are not relocation-invariant by construction. `large_region_area_v2`, `large_route_length_v2` and `large_max_geodesic_span` are shifted in degrees, so their true answers differ by 11–21% (per-family median) across variants. They account for 22 of 36 false rejections (bare model) and 24 of 37 (`darwinx_soft` teacher).
+- `topological_containment_v2` has invariant truths but still loses 8 (bare model) and 9 (`darwinx_soft` teacher) correct scripts: some probe changes the data beyond the answer tolerance (not yet traced).
+- For the strong teacher, 17 of 23 rejections come from `probe_r3_km_units`. Seven are exact ~1000× unit errors (scripts that treat a km-unit projected CRS as metres). No oracle variant stores data in km, so these are latent bugs the benchmark does not grade rather than gate errors; the other 10 drift by 0–6× and are not yet traced.
+- Effect on distillation data: the bare model writes 25 oracle-correct `large_region_area_v2` scripts, and the metamorphic filter keeps 2 of them in `base_meta`, so `sft_base_meta` sees almost no correct examples of that family.
+
+### 2. Reference solutions on real OpenStreetMap tasks (`data/osm_global` + `data/osm_eval`, 120 tasks)
+
+One reference solution per template (local azimuthal-equidistant projection; reproduces all 120 stored truths), with every probe run and scored separately:
+
+| Template | Gate pass | Rejecting probes |
+|---|---|---|
+| 9 metric templates (area, length, perimeter, buffers, nearest neighbour, density) | 96/96 | — |
+| `osm_northernmost_bldg_lat` (absolute position) | 0/8 | `shift_and_shuffle`, `crs_storage_flip`, `probe_r2_polar_laea`: the answer becomes the probe's target latitude (58.3, −56.2, 86.0) |
+| `osm_north_half_bldg_count` (absolute position) | 7/8 | `probe_r2_polar_laea` (1) |
+| `osm_bldg_road_intersects_cnt` (exact-topology control) | 3/8 | `crs_storage_flip` (5): the reprojection round trip breaks shared-vertex contacts and counts drop by 2–6 |
+
+Implications: the gate is a high-precision filter (97–99% of passed scripts are oracle-correct), but its assumption that every probe preserves the answer fails for answers tied to absolute position (including 3 of the 20 GSB v2 families) and for probes that are not lossless. Results built on the gate should report its false-rejection rate and the families in which it systematically discards correct solutions.
+
 ---
 
 ## 3. Open Methodological Risks & Mitigation Tracker
@@ -243,6 +276,7 @@ Key Wave S4-2 breakthroughs:
 | **R3** | **Missing baselines & seed count**: Need non-evolution baselines, Oracle/soft-DarwinX/LLM-judge controls, and ≥6–8 seeds. | **Non-evolution, soft-DarwinX & Oracle completed (2026-11-21); `llm_judge` & ≥6 seeds planned on GSB v2** | Completed `handcrafted` (`74.2%`), `runtime_meta` (`70.0%`), `darwinx_soft` ($\delta=0.14$), and `oracle`; scale full multi-seed matrix + `llm_judge` on GSB v2. |
 | **R4** | **Swallowed-exception degradation**: Rule-heavy prompts and OOD fallbacks silently swallow exceptions. | **Resolved & ablated (2026-11-21)** | Domain-neutral `sys.monitoring` telemetry broke 2nd-order `except RuntimeError: EPSG:3857` lock-in during polar co-evolution (`16.7% → 88.9%` in-loop). |
 | **R5** | **Bounded iteration vs true RSI**: Fixed human-written `metamorphic.py` + closed-API Meta-Agent. | **Core mechanisms verified (2026-11-21)** | Verified (a) non-circular self-certified verifier co-evolution, (b) 100% open-weight symmetric `26B → 26B` evolution, and (c) Dual-G4 Two-Timescale Harness → SFT + GRPO-Metamorphic → Gen-2 compounding (`36.5% → 93.3%`). |
+| **R6** | **Gate false rejections on non-invariant answers**: the metamorphic gate assumes every probe preserves the answer. | **Measured (2026-11-25), open** | Section 2.4: the full gate rejects 5.8–20.4% of oracle-correct scripts; 3 of 20 GSB v2 families are not relocation-invariant; correct real-OSM latitude solutions are rejected 8/8. Next: exclude or re-specify probes for non-invariant families, report the false-rejection rate next to every gate result, trace the `topological_containment_v2` and km-unit cases. |
 
 ---
 

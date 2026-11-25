@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meta-rsi"
-version = "0.2.0"
-description = "Metamorphic-Gated Recursive Self-Improvement for Geospatial Analysis LLM Agents"
+version = "0.8.0"
+description = "Benchmarking and Mitigating Proxy Lock-In in Geospatial LLM Agents via Metamorphic Verification and Two-Timescale Distillation"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
@@ -15,12 +15,14 @@ dependencies = [
     "pandas",
     "pyogrio",
     "pyproj",
+    "rasterio",
     "scipy",
     "shapely",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+train = ["torch", "transformers", "peft", "accelerate", "vllm"]
 
 [project.scripts]
 meta-rsi-evolve = "meta_rsi.evolve:main"

@@ -1,0 +1,240 @@
+"""Seed- and task-paired summary of a unified 6-seed re-evaluation (scripts/rebuttal/unified_6seed_eval.py).
+
+Per method and protocol: mean +- sd over seeds of the share of tasks correct on every variant (Protocol A
+averaged over its repeats), the lucky / silent-wrong / error shares, and the shift from the original eval.
+Protocol A vs B: what live deployment (B) does to the tasks Protocol A scored correct, lucky or silent-wrong.
+Each method against a reference (default arch_coev): the seed-paired difference, an exact sign-flip test over
+seeds (Holm-adjusted across methods), and a 95% interval from a bootstrap that resamples seeds (paired) and
+task families. With 6 seeds the smallest two-sided sign-flip p is 2/64 = 0.031, so the seed-level test alone
+cannot survive a multiplicity correction; read the bootstrap interval alongside it.
+
+    python -m meta_rsi.eval.unified_summary runs/v10_unified_6seed [--ref arch_coev]
+"""
+from __future__ import annotations
+
+import argparse
+import itertools
+import json
+import re
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import numpy as np
+
+CATS = ("correct", "lucky", "silent_wrong", "error")
+_EVAL_RE = re.compile(r"^(?P<tag>.+)_(?P<proto>[AB])_rep(?P<rep>\d+)\.json$")
+
+
+def _cat(c: str | None) -> str:
+    return c if c in CATS else "error"  # no_code / missing count as error, as in eval_test's rates()
+
+
+def load_runs(out: Path) -> tuple[dict, dict[tuple[str, str], list[dict[str, dict]]]]:
+    """manifest, and {(tag, protocol): [ {task_id: record} per clean repeat, in rep order ]}."""
+    manifest = json.loads((out / "manifest.json").read_text())
+    tags = {e["tag"] for e in manifest["entries"]}
+    found: dict[tuple[str, str], list[tuple[int, dict]]] = defaultdict(list)
+    for f in sorted((out / "evals").glob("*.json")):
+        m = _EVAL_RE.match(f.name)
+        if not m or m["tag"] not in tags:
+            continue
+        d = json.loads(f.read_text())
+        recs = d.get("records") or []
+        if int((d.get("usage") or {}).get("errors", 1)) != 0 or not recs or len(recs) != d["ALL"]["n"]:
+            continue  # unfinished or backend errors: `run` redoes these
+        found[(m["tag"], m["proto"])].append((int(m["rep"]), {r["task_id"]: r for r in recs}))
+    return manifest, {k: [recs for _, recs in sorted(v, key=lambda x: x[0])] for k, v in found.items()}
+
+
+def sign_flip_p(diffs: list[float]) -> float:
+    """Exact two-sided sign-flip permutation p-value for the mean of paired differences."""
+    d = np.asarray(diffs, dtype=float)
+    if len(d) == 0:
+        return float("nan")
+    obs = abs(d.mean())
+    signs = np.array(list(itertools.product((1.0, -1.0), repeat=len(d))))
+    return float(np.mean(np.abs((signs * d).mean(axis=1)) >= obs - 1e-12))
+
+
+def holm(ps: list[float]) -> list[float]:
+    order = sorted(range(len(ps)), key=lambda i: ps[i])
+    adj, running = [0.0] * len(ps), 0.0
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, (len(ps) - rank) * ps[i]))
+        adj[i] = running
+    return adj
+
+
+def hier_bootstrap_ci(x1: np.ndarray, x2: np.ndarray, fam: np.ndarray, n_boot: int = 4000, seed: int = 0) -> tuple[float, float]:
+    """95% CI of mean(x1 - x2); x* are (n_seeds, n_tasks) paired by row (seed) and column (task).
+
+    Resamples seeds with replacement (keeping the pairing), then task families with replacement (all tasks of a
+    drawn family enter with it), so both evolution randomness and test-set composition widen the interval.
+    """
+    rng = np.random.default_rng(seed)
+    diff = x1 - x2
+    fams = np.unique(fam)
+    onehot = (fam[None, :] == fams[:, None]).astype(float)  # (n_fams, n_tasks)
+    stats = np.empty(n_boot)
+    for b in range(n_boot):
+        rows = diff[rng.integers(0, diff.shape[0], diff.shape[0])]
+        w = np.bincount(rng.integers(0, len(fams), len(fams)), minlength=len(fams)) @ onehot  # task weights
+        stats[b] = (rows @ w).sum() / (rows.shape[0] * w.sum())
+    lo, hi = np.percentile(stats, [2.5, 97.5])
+    return float(lo), float(hi)
+
+
+def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
+    manifest, runs = load_runs(out)
+    entries = manifest["entries"]
+    methods = list(dict.fromkeys(e["method"] for e in entries))
+    task_ids = sorted({tid for reps in runs.values() for recs in reps for tid in recs})
+    fam_of = {tid: recs[tid]["family"] for reps in runs.values() for recs in reps for tid in recs}
+    tidx = {t: i for i, t in enumerate(task_ids)}
+    fam = np.array([fam_of[t] for t in task_ids])
+
+    def matrix(method: str, proto: str, cat: str = "correct") -> dict[int, np.ndarray]:
+        """{seed: per-task share of repeats in `cat`} for one method; seeds without a clean run are absent."""
+        outm = {}
+        for e in entries:
+            reps = runs.get((e["tag"], proto)) if e["method"] == method else None
+            if not reps:
+                continue
+            v = np.full(len(task_ids), np.nan)
+            for tid in task_ids:
+                vals = [_cat(r[tid]["category"]) == cat for r in reps if tid in r]
+                if vals:
+                    v[tidx[tid]] = np.mean(vals)
+            outm[e["seed"]] = v
+        return outm
+
+    report: dict = {"n_tasks": len(task_ids), "n_families": int(len(np.unique(fam))), "methods": {}, "vs_ref": {}}
+    for proto in ("A", "B"):
+        for m in methods:
+            per_cat = {c: matrix(m, proto, c) for c in CATS}
+            seeds = sorted(per_cat["correct"])
+            if not seeds:
+                continue
+            row = {"seeds": seeds, "n_reps": {e["seed"]: len(runs.get((e["tag"], proto), [])) for e in entries if e["method"] == m}}
+            for c in CATS:
+                vals = [float(np.nanmean(per_cat[c][s])) for s in seeds]
+                row[c] = {"mean": float(np.mean(vals)), "sd": float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0, "per_seed": vals}
+            if proto == "A":
+                orig = {e["seed"]: e.get("orig_correct") for e in entries if e["method"] == m}
+                shift = [row["correct"]["per_seed"][i] - orig[s] for i, s in enumerate(seeds) if orig.get(s) is not None]
+                row["shift_vs_orig_eval"] = float(np.mean(shift)) if shift else None
+                row["orig_models"] = sorted({str(e.get("orig_model")) for e in entries if e["method"] == m})
+            report["methods"].setdefault(m, {})[proto] = row
+
+        if ref in methods:
+            ref_m = matrix(ref, proto)
+            rows, ps = [], []
+            for m in methods:
+                if m == ref:
+                    continue
+                mm = matrix(m, proto)
+                common = sorted(set(mm) & set(ref_m))
+                if not common:
+                    continue
+                keep = ~np.isnan(np.stack([mm[s] for s in common] + [ref_m[s] for s in common])).any(axis=0)
+                x1 = np.stack([mm[s][keep] for s in common])
+                x2 = np.stack([ref_m[s][keep] for s in common])
+                d = (x1.mean(axis=1) - x2.mean(axis=1)).tolist()
+                lo, hi = hier_bootstrap_ci(x1, x2, fam[keep], n_boot=n_boot)
+                rows.append({"method": m, "n_seeds": len(common), "diff": float(np.mean(d)), "per_seed_diff": d,
+                             "sign_flip_p": sign_flip_p(d), "boot_ci95": [lo, hi]})
+                ps.append(rows[-1]["sign_flip_p"])
+            for r, p_adj in zip(rows, holm(ps)):
+                r["sign_flip_p_holm"] = p_adj
+            report["vs_ref"][proto] = {"ref": ref, "rows": rows}
+
+    # Protocol A -> B: the live fate of each A category (first repeat of each, per seed and task).
+    trans: dict[str, Counter] = {}
+    for m in methods:
+        cnt: Counter = Counter()
+        for e in entries:
+            if e["method"] != m or not runs.get((e["tag"], "A")) or not runs.get((e["tag"], "B")):
+                continue
+            ra, rb = runs[(e["tag"], "A")][0], runs[(e["tag"], "B")][0]
+            for tid in set(ra) & set(rb):
+                cnt[(_cat(ra[tid]["category"]), _cat(rb[tid]["category"]))] += 1
+        if cnt:
+            trans[m] = cnt
+    report["a_to_b"] = {
+        m: {a_c: {"n": sum(cnt[(a_c, b)] for b in CATS),
+                  "b_correct": cnt[(a_c, "correct")] / max(sum(cnt[(a_c, b)] for b in CATS), 1)} for a_c in CATS}
+        for m, cnt in trans.items()
+    }
+
+    # Repeat variability of Protocol A on the same harness and server.
+    deltas, flips = [], []
+    for e in entries:
+        reps = runs.get((e["tag"], "A"), [])
+        for r1, r2 in itertools.combinations(reps, 2):
+            common = set(r1) & set(r2)
+            c1 = [_cat(r1[t]["category"]) == "correct" for t in common]
+            c2 = [_cat(r2[t]["category"]) == "correct" for t in common]
+            deltas.append(abs(np.mean(c1) - np.mean(c2)))
+            flips.append(np.mean([a != b for a, b in zip(c1, c2)]))
+    report["repeat_variability_A"] = (
+        {"pairs": len(deltas), "mean_abs_delta": float(np.mean(deltas)), "max_abs_delta": float(np.max(deltas)),
+         "mean_task_flip_rate": float(np.mean(flips))} if deltas else None
+    )
+    report["missing_harnesses"] = manifest.get("missing", [])
+    return report
+
+
+def render(rep: dict) -> str:
+    pct = lambda x: f"{100 * x:5.1f}"  # noqa: E731
+    lines = [f"Unified re-evaluation: {rep['n_tasks']} tasks, {rep['n_families']} families", ""]
+    for proto in ("A", "B"):
+        lines += [f"## Protocol {proto}", "",
+                  "| method | seeds | correct | lucky | silent_wrong | error |" + (" vs orig eval |" if proto == "A" else ""),
+                  "|---|---|---|---|---|---|" + ("---|" if proto == "A" else "")]
+        for m, by_p in rep["methods"].items():
+            r = by_p.get(proto)
+            if not r:
+                continue
+            cells = [f"{pct(r[c]['mean'])} ± {pct(r[c]['sd']).strip()}" for c in CATS]
+            extra = ""
+            if proto == "A":
+                s = r.get("shift_vs_orig_eval")
+                extra = f" {'n/a' if s is None else f'{100 * s:+.1f}'} |"
+            lines.append(f"| {m} | {len(r['seeds'])} | " + " | ".join(cells) + " |" + extra)
+        vs = rep["vs_ref"].get(proto)
+        if vs:
+            lines += ["", f"Difference in correct vs `{vs['ref']}` (seed-paired):", "",
+                      "| method | seeds | diff (pp) | sign-flip p | Holm p | 95% CI seeds×families (pp) |", "|---|---|---|---|---|---|"]
+            for r in vs["rows"]:
+                lo, hi = r["boot_ci95"]
+                lines.append(f"| {r['method']} | {r['n_seeds']} | {100 * r['diff']:+.1f} | {r['sign_flip_p']:.3f} | "
+                             f"{r['sign_flip_p_holm']:.3f} | [{100 * lo:+.1f}, {100 * hi:+.1f}] |")
+        lines.append("")
+    if rep["a_to_b"]:
+        lines += ["## Protocol A category -> share correct under live deployment (B)", "",
+                  "| method | A correct | A lucky | A silent_wrong | A error |", "|---|---|---|---|---|"]
+        for m, t in rep["a_to_b"].items():
+            lines.append(f"| {m} | " + " | ".join(f"{pct(t[c]['b_correct'])} (n={t[c]['n']})" for c in CATS) + " |")
+        lines.append("")
+    rv = rep["repeat_variability_A"]
+    if rv:
+        lines.append(f"Protocol A repeats: {rv['pairs']} pairs, mean |Δ correct| {100 * rv['mean_abs_delta']:.1f} pp "
+                     f"(max {100 * rv['max_abs_delta']:.1f}), {100 * rv['mean_task_flip_rate']:.1f}% of tasks flip.")
+    if rep["missing_harnesses"]:
+        lines.append(f"Missing harnesses: {', '.join(rep['missing_harnesses'])}")
+    return "\n".join(lines)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Summarize a unified 6-seed re-evaluation")
+    ap.add_argument("out", nargs="?", default="runs/v10_unified_6seed")
+    ap.add_argument("--ref", default="arch_coev")
+    ap.add_argument("--n-boot", type=int, default=4000)
+    a = ap.parse_args()
+    rep = summarize(Path(a.out), ref=a.ref, n_boot=a.n_boot)
+    (Path(a.out) / "unified_summary.json").write_text(json.dumps(rep, indent=2))
+    print(render(rep))
+
+
+if __name__ == "__main__":
+    main()
