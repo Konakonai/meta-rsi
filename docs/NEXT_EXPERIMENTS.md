@@ -160,7 +160,7 @@ Source: `runs/agent_mail/carbon_reply_2.md`. Each point was checked first. Nothi
   - Side effect: the relocated edges no longer expose vertex-only reprojection, so the 6 polar rejections of well-formed polygons and 3 polar-curvature `other` rejections also clear.
 - **Regression of both fixes** (my rerun of the full gate on 1,384 scripts; `runs/v11_gate_precision/gate_vs_oracle_*_e1.jsonl`):
   - Of the 96 false rejections, 18 clear and 78 stay; no script newly fails.
-  - 6 oracle-wrong scripts newly pass. One was rejected only by the unsplit-polygon bug. The other five drift 1.1–2.0% (tolerance): false acceptance rises 0.8→1.9%, 8.5→10.6% and 1.3→1.9% in the three populations.
+  - 6 oracle-wrong scripts newly pass: false acceptance rises 0.8→1.9%, 8.5→10.6% and 1.3→1.9% in the three populations. (The split between the two fixes first given here was wrong; see Amendment 3: 4 come from the tolerance, 2 from the probe fix.)
   - The tolerance is settled in Amendment 3, after a rerun with the fixed probes at 1% separates the two fixes.
 
 **Calibration result (2026-11-26, 00:35 CST, under the rule above).** Retention among scripts correct on `low` (`scripts/rebuttal/calibrate_heldout_mech.py`):
@@ -174,3 +174,19 @@ Source: `runs/agent_mail/carbon_reply_2.md`. Each point was checked first. Nothi
 - Neither candidate falls in [10%, 90%], so far transfer stays `raster_southup` alone; `vector_z` and `multipart` are reported as descriptive. The 19 unscored `multipart` variants are `large_max_geodesic_span` tasks, where the reference solver's own answer changes on multi-part input.
 - By the rule fixed beforehand, E2's far comparison will be reported as uninformative about M1 unless the arms' own `lowok` falls below 90%. E2 then measures near transfer only.
 - What the calibration does show: on representation changes outside CRS and units (row order, Z, multi-part, NaN-free rasters), these scripts almost never break, because GeoPandas, Shapely and rasterio absorb the change. Their failures concentrate in the CRS, unit and nodata mechanisms that the gate's probes target.
+
+## Amendment 3 (2026-11-26, 00:50 CST): E1 gate tolerance stays at 2%
+
+The full gate was rerun with the fixed probes at 1% to separate the two fixes (`runs/v11_gate_precision/gate_vs_oracle_*_e1_tol1.jsonl`). One script (`multi_ring_density-train-0045`) did not reproduce its `low` answer in that run, a timeout under load, and is left out.
+
+| Gate (1,384 scripts) | False rejections cleared (of 96) | Correct scripts newly rejected | Wrong scripts newly accepted |
+|---|---|---|---|
+| Fixed probes, 1% | 12 | 1 | 2 |
+| Fixed probes, 2% (pre-registered) | 18 | 0 | 6 |
+
+- **The tolerance alone** (2% against 1%, both with the fixed probes) accepts 7 more oracle-correct scripts and 4 more oracle-wrong ones.
+  - All 7 correct ones are `large_region_area_v2` scripts that drift 1.1–1.3% under the polar or storage probes. One of them passed the original gate and would newly fail at 1%.
+  - The 4 wrong ones are `raster_buffer_extract-train-0051` (in two populations) and `multi_ring_density-train-0047` / `-0024`, drifting 1.1–2.0%.
+- **The probe fix alone** accepts 2 wrong scripts: `large_region_area_v2-train-0027`, rejected before only by the unsplit-polygon bug, and `-0054`, whose drift falls below 1% once the relocated edges are densified.
+- Amendment 2's note that 5 of the 6 new acceptances come from the tolerance was wrong: it compared the original gate with both fixes at once. The correct split is 4 from the tolerance and 2 from the probe fix.
+- **Decision.** The pre-registered 2% stays. It recovers more correct scripts than it admits wrong ones, and the correct ones belong to `large_region_area_v2`, the family the filter nearly emptied in `base_meta` (2 of 25 correct scripts kept, §2.4), which is exactly the support problem E1 is designed to remove.
