@@ -337,7 +337,9 @@ def cmd_fetch(a: argparse.Namespace) -> None:
     out = Path(a.out).resolve()
     remote = f"/content/unified_work/{out.relative_to(REPO)}/evals"
     listing = subprocess.run(["colab", "ls", "-s", a.session, remote], capture_output=True, text=True, check=True).stdout
-    names = [ln.strip() for ln in listing.splitlines() if ln.strip().endswith((".json", ".code.jsonl"))]
+    names = [ln.strip() for ln in listing.splitlines()
+             if ln.strip().endswith((".json", ".code.jsonl"))
+             and not ln.strip().endswith((".blind.json", ".heldout.json"))]
     got = 0
     for name in sorted(names, key=lambda n: n.endswith(".json")):  # sidecars first, so is_clean can see them
         dst = out / "evals" / name
