@@ -32,7 +32,9 @@ GSB2_GROUPS: dict[str, set[str]] = {
 
 def extract_metrics(path: Path) -> dict:
     d = json.loads(path.read_text())
-    uerr = int((d.get("usage") or {}).get("errors", 0))
+    u = d.get("usage") or {}
+    uerr = int(u.get("errors", 0))
+    ucalls = int(u.get("calls", 0))
     a, s, h = d["ALL"], d["SEEN_18"], d["HELDOUT_3"]
     pf = d.get("per_family") or {}
     groups = {}
@@ -51,6 +53,7 @@ def extract_metrics(path: Path) -> dict:
         "silent_wrong": float(a["silent_wrong"]),
         "error": float(a["error"]),
         "calls": float(d.get("avg_llm_calls", 0.0)),
+        "usage_calls": ucalls,
         "uerr": uerr,
         "groups": groups,
     }
@@ -187,15 +190,19 @@ def summarize_gsb2(runs_dir: Path) -> dict:
         if p:
             singles[label] = extract_metrics(p)
 
-    # Check zero usage errors across all found files
+    # Check zero usage errors AND calls >= n across all found files
     bad_uerr = []
+    def _audit_rec(tag: str, rec: dict) -> None:
+        if rec["uerr"] > 0:
+            bad_uerr.append((tag, f"uerr={rec['uerr']}", rec["path"]))
+        elif rec.get("usage_calls", rec["n"]) < rec["n"]:
+            bad_uerr.append((tag, f"calls={rec['usage_calls']}<n={rec['n']}", rec["path"]))
+
     for mname, smap in methods.items():
         for s, rec in smap.items():
-            if rec["uerr"] > 0:
-                bad_uerr.append((f"{mname}:s{s}", rec["uerr"], rec["path"]))
+            _audit_rec(f"{mname}:s{s}", rec)
     for sname, rec in singles.items():
-        if rec["uerr"] > 0:
-            bad_uerr.append((sname, rec["uerr"], rec["path"]))
+        _audit_rec(sname, rec)
 
     agg = {}
     for mname, smap in methods.items():
@@ -237,18 +244,29 @@ def summarize_gsb2(runs_dir: Path) -> dict:
             )
 
     # SciUnits 3-seed paired matrix (prefer fixed v2 digest runs when present)
-    sci_methods: dict[str, dict[int, dict]] = {"darwinx_soft": {}, "meta_soft": {}}
+    sci_methods: dict[str, dict[int, dict]] = {
+        "darwinx_soft": {},
+        "meta_soft": {},
+        "gem4h_darwinx": {},
+        "gem4h_meta": {},
+    }
     for s in range(3):
         p_sd = _find_first(roots, [f"eval_sci_s{s}_darwinx_v2.json", f"eval_sci_s{s}_darwinx_soft.json"])
         if p_sd:
             sci_methods["darwinx_soft"][s] = extract_metrics(p_sd)
-            if sci_methods["darwinx_soft"][s]["uerr"] > 0:
-                bad_uerr.append((f"sci_darwinx_soft:s{s}", sci_methods["darwinx_soft"][s]["uerr"], str(p_sd)))
+            _audit_rec(f"sci_darwinx_soft:s{s}", sci_methods["darwinx_soft"][s])
         p_sm = _find_first(roots, [f"eval_sci_s{s}_meta_v2.json", f"eval_sci_s{s}_meta_soft.json"])
         if p_sm:
             sci_methods["meta_soft"][s] = extract_metrics(p_sm)
-            if sci_methods["meta_soft"][s]["uerr"] > 0:
-                bad_uerr.append((f"sci_meta_soft:s{s}", sci_methods["meta_soft"][s]["uerr"], str(p_sm)))
+            _audit_rec(f"sci_meta_soft:s{s}", sci_methods["meta_soft"][s])
+        p_gd = _find_first(roots, [f"eval_sci_gem4h_s{s}_darwinx.json"])
+        if p_gd:
+            sci_methods["gem4h_darwinx"][s] = extract_metrics(p_gd)
+            _audit_rec(f"sci_gem4h_darwinx:s{s}", sci_methods["gem4h_darwinx"][s])
+        p_gm = _find_first(roots, [f"eval_sci_gem4h_s{s}_meta.json"])
+        if p_gm:
+            sci_methods["gem4h_meta"][s] = extract_metrics(p_gm)
+            _audit_rec(f"sci_gem4h_meta:s{s}", sci_methods["gem4h_meta"][s])
 
     sci_agg = {}
     for gm, smap in sci_methods.items():
@@ -258,10 +276,12 @@ def summarize_gsb2(runs_dir: Path) -> dict:
         sci_agg[gm] = {
             "seeds": seeds,
             "per_seed_all": {str(s): round(100 * smap[s]["all"], 2) for s in seeds},
+            "per_seed_ho": {str(s): round(100 * smap[s]["ho"], 2) for s in seeds},
             "all": mean_sd([smap[s]["all"] for s in seeds]),
             "seen": mean_sd([smap[s]["seen"] for s in seeds]),
             "ho": mean_sd([smap[s]["ho"] for s in seeds]),
             "lucky": mean_sd([smap[s]["lucky"] for s in seeds]),
+            "silent_wrong": mean_sd([smap[s]["silent_wrong"] for s in seeds]),
             "error": mean_sd([smap[s]["error"] for s in seeds]),
             "calls": mean_sd([smap[s]["calls"] for s in seeds]),
         }
@@ -271,12 +291,63 @@ def summarize_gsb2(runs_dir: Path) -> dict:
             [sci_methods["meta_soft"][s]["all"] for s in sci_shared],
             [sci_methods["darwinx_soft"][s]["all"] for s in sci_shared],
         )
+    sci_g_shared = sorted(set(sci_methods["gem4h_meta"]) & set(sci_methods["gem4h_darwinx"]))
+    if len(sci_g_shared) >= 2:
+        comparisons["sci_gem4h_meta_vs_darwinx"] = paired_tests(
+            [sci_methods["gem4h_meta"][s]["all"] for s in sci_g_shared],
+            [sci_methods["gem4h_darwinx"][s]["all"] for s in sci_g_shared],
+        )
+
+    # Real OpenStreetMap 4-city urban transfer (n=24, 6-seed arch_coev)
+    osm_arch: dict[int, dict] = {}
+    for s in range(6):
+        p_osm = _find_first(roots, [f"eval_osm_s{s}_arch_coev.json"])
+        if p_osm:
+            osm_arch[s] = extract_metrics(p_osm)
+            _audit_rec(f"osm_arch_coev:s{s}", osm_arch[s])
+    osm_agg = {}
+    if osm_arch:
+        seeds = sorted(osm_arch)
+        osm_agg["arch_coev"] = {
+            "seeds": seeds,
+            "per_seed_all": {str(s): round(100 * osm_arch[s]["all"], 2) for s in seeds},
+            "all": mean_sd([osm_arch[s]["all"] for s in seeds]),
+            "silent_wrong": mean_sd([osm_arch[s]["silent_wrong"] for s in seeds]),
+            "error": mean_sd([osm_arch[s]["error"] for s in seeds]),
+            "calls": mean_sd([osm_arch[s]["calls"] for s in seeds]),
+        }
+
+    # GeoAnalystBench external benchmark audit
+    geoanalyst = {}
+    for label, fname in [
+        ("base_26b", "eval_geoanalyst_base_26b.json"),
+        ("sft_weak_26b", "eval_geoanalyst_sft_weak_26b.json"),
+        ("sft_meta_26b", "eval_geoanalyst_sft_meta_26b.json"),
+        ("grpo_meta_26b", "eval_geoanalyst_grpo_meta_26b.json"),
+    ]:
+        p_ga = _find_first(roots, [fname])
+        if p_ga:
+            gd = json.loads(p_ga.read_text())
+            gs = gd.get("summary") or {}
+            gu = gs.get("usage") or {}
+            uerr = int(gu.get("errors", 0))
+            ucalls = int(gu.get("calls", 0))
+            gn = int(gs.get("n", 0))
+            if uerr > 0:
+                bad_uerr.append((f"geoanalyst:{label}", f"uerr={uerr}", str(p_ga)))
+            elif gn > 0 and ucalls < gn:
+                bad_uerr.append((f"geoanalyst:{label}", f"calls={ucalls}<n={gn}", str(p_ga)))
+            geoanalyst[label] = {k: v for k, v in gs.items() if k != "usage"}
+            geoanalyst[label]["uerr"] = uerr
+            geoanalyst[label]["calls"] = ucalls
 
     return {
         "usage_error_violations": bad_uerr,
         "gsb2_multiseed": agg,
         "gsb2_singles": singles,
+        "osm_multiseed": osm_agg,
         "sci_multiseed": sci_agg,
+        "geoanalyst": geoanalyst,
         "paired_tests": comparisons,
     }
 
@@ -313,12 +384,30 @@ def print_report(rep: dict) -> None:
                 f"CompV={100*g.get('CompV',0):5.1f}% Rast={100*g.get('Rast',0):5.1f}% Large={100*g.get('Large',0):5.1f}% Ctrl={100*g.get('Ctrl',0):5.1f}%"
             )
 
+    if rep.get("osm_multiseed"):
+        print("\n=== Real OpenStreetMap 4-City Urban Transfer (n=24) ===")
+        for m, d in rep["osm_multiseed"].items():
+            print(
+                f"osm_{m:<12} {len(d['seeds']):>2} | ALL={_fmt(d['all'])} SilW={_fmt(d['silent_wrong'])} "
+                f"Err={_fmt(d['error'])} Calls={_fmt(d['calls'], False)} | {d['per_seed_all']}"
+            )
+
     if rep["sci_multiseed"]:
         print("\n=== SciUnits Multi-Seed Matrix (eval280) ===")
         for m, d in rep["sci_multiseed"].items():
             print(
-                f"sci_{m:<12} {len(d['seeds']):>2} | ALL={_fmt(d['all'])} Seen={_fmt(d['seen'])} HO={_fmt(d['ho'])} "
-                f"Lucky={_fmt(d['lucky'])} Err={_fmt(d['error'])} Calls={_fmt(d['calls'], False)} | {d['per_seed_all']}"
+                f"sci_{m:<14} {len(d['seeds']):>2} | ALL={_fmt(d['all'])} Seen={_fmt(d['seen'])} HO={_fmt(d['ho'])} "
+                f"Lucky={_fmt(d['lucky'])} SilW={_fmt(d['silent_wrong'])} Err={_fmt(d['error'])} Calls={_fmt(d['calls'], False)} | {d['per_seed_all']}"
+            )
+
+    if rep.get("geoanalyst"):
+        print("\n=== GeoAnalystBench Deterministic Audit (n=17) ===")
+        for label, g in rep["geoanalyst"].items():
+            print(
+                f"{label:<16} | syntax={100*g['syntax_ok']:5.1f}% 3857={100*g['uses_3857_all']:4.1f}% "
+                f"proj_vec={100*g['projected_metric_vec']:5.1f}% dyn_crs={100*g['dynamic_crs_vec']:4.1f}% "
+                f"nodata={100*g['raster_nodata_safe']:5.1f}% align={100*g['crs_aligned']:5.1f}% "
+                f"strict_sound={100*g['strict_geo_sound']:5.1f}% (uerr={g['uerr']}, calls={g['calls']})"
             )
 
     if rep["paired_tests"]:

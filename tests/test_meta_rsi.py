@@ -757,6 +757,19 @@ def test_geoanalyst_audit_and_probe_loader(tmp_path):
     assert loaded is not None and len(loaded) == 1 and loaded[0][0] == "p1"
 
 
+def test_dgm_select_parent_with_extra_seed_ancestors(tmp_path):
+    """DGM parent selection must not crash when only gen<=0 seed + Stage-1 ancestors exist."""
+    import random
+    from meta_rsi.archive import ArchiveEntry, LineageArchive
+    arch = LineageArchive(tmp_path / "arch", "meta_soft", parent_policy="dgm")
+    arch.add(ArchiveEntry(0, None, "seed.py", "seed", 0.5, 0.25, 0.0, 1.0, ["t1"]))
+    arch.add(ArchiveEntry(-1, None, "anc.py", "stage1", 0.7, 0.25, 0.1, 1.1, ["t2"]))
+    p, partner = arch.select_parent(random.Random(0))
+    assert p.gen in (0, -1)
+    assert partner is not None and partner.gen != p.gen
+
+
+
 
 
 

@@ -133,22 +133,59 @@ def generate_all(runs_dir: Path, out_dir: Path) -> None:
                 f"{_fmt_pct_ms(g['CompV'])} | {_fmt_pct_ms(g['Rast'])} | {d['calls'][0]:.2f} ± {d['calls'][1]:.2f} |"
             )
 
+    if rep.get("osm_multiseed"):
+        md.extend([
+            "",
+            "## Table 2: Zero-Shot Real OpenStreetMap 4-City Urban Transfer (`n=24`, 6 Seeds)",
+            "",
+            "| Method | Seeds | ALL | SilW | Err | Calls | Per-Seed ALL |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        ])
+        for mkey, mlabel in [("arch_coev", "Archive-Preserving Co-Ev (`arch_coev`)")]:
+            if mkey in rep["osm_multiseed"]:
+                d = rep["osm_multiseed"][mkey]
+                ps = ", ".join(f"s{k}={v:.1f}%" for k, v in d["per_seed_all"].items())
+                md.append(
+                    f"| **{mlabel}** | {len(d['seeds'])} | {_fmt_pct_ms(d['all'])} | {_fmt_pct_ms(d['silent_wrong'])} | "
+                    f"{_fmt_pct_ms(d['error'])} | {d['calls'][0]:.2f} ± {d['calls'][1]:.2f} | {ps} |"
+                )
+
     if rep["sci_multiseed"]:
         md.extend([
             "",
-            "## Table 2: Non-GIS SciUnits Multi-Seed Paired Comparison (`eval280`)",
+            "## Table 3: Non-GIS SciUnits Multi-Seed Paired Comparison (`eval280`)",
             "",
-            "| Method | Seeds | ALL | Seen (8) | Held-Out (4) | Lucky | Err | Calls |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Method | Seeds | ALL | Seen (8) | Held-Out (4) | Lucky | SilW | Err | Calls |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ])
-        for mkey, mlabel in [("darwinx_soft", "DarwinX-Soft (canonical SI dev)"), ("meta_soft", "Meta-Soft (unit/sentinel invariance)")]:
+        for mkey, mlabel in [
+            ("darwinx_soft", "DarwinX-Soft (`26B -> 26B`, canonical SI dev)"),
+            ("meta_soft", "Meta-Soft (`26B -> 26B`, unit/sentinel invariance)"),
+            ("gem4h_darwinx", "DarwinX-Soft (`gem4h -> 26B`, canonical SI dev)"),
+            ("gem4h_meta", "Meta-Soft (`gem4h -> 26B`, unit/sentinel invariance)"),
+        ]:
             if mkey in rep["sci_multiseed"]:
                 d = rep["sci_multiseed"][mkey]
                 md.append(
                     f"| {mlabel} | {len(d['seeds'])} | {_fmt_pct_ms(d['all'])} | {_fmt_pct_ms(d['seen'])} | "
-                    f"{_fmt_pct_ms(d['ho'])} | {_fmt_pct_ms(d['lucky'])} | {_fmt_pct_ms(d['error'])} | "
-                    f"{d['calls'][0]:.2f} ± {d['calls'][1]:.2f} |"
+                    f"{_fmt_pct_ms(d['ho'])} | {_fmt_pct_ms(d['lucky'])} | {_fmt_pct_ms(d['silent_wrong'])} | "
+                    f"{_fmt_pct_ms(d['error'])} | {d['calls'][0]:.2f} ± {d['calls'][1]:.2f} |"
                 )
+
+    if rep.get("geoanalyst"):
+        md.extend([
+            "",
+            "## Table 4: External `GeoAnalystBench` Deterministic Audit (`n=17`)",
+            "",
+            "| Weights | Syntax OK | Uses 3857 | Proj Metric Vec | Dynamic CRS Vec | Raster NoData Safe | CRS Aligned | Strict Geo Sound |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for label, g in rep["geoanalyst"].items():
+            md.append(
+                f"| `{label}` | {100*g['syntax_ok']:.1f}% | {100*g['uses_3857_all']:.1f}% | "
+                f"{100*g['projected_metric_vec']:.1f}% | {100*g['dynamic_crs_vec']:.1f}% | "
+                f"{100*g['raster_nodata_safe']:.1f}% | {100*g['crs_aligned']:.1f}% | **{100*g['strict_geo_sound']:.1f}%** |"
+            )
 
     (out_dir / "summary_tables.md").write_text("\n".join(md) + "\n")
     (out_dir / "summary_data.json").write_text(json.dumps(rep, indent=2))

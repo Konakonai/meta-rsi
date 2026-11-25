@@ -2,7 +2,7 @@
 
 > Living master document for the `meta-rsi` research project, undergraduate thesis, and SCI / top-venue manuscript.
 > Repository: `https://github.com/Konakonai/meta-rsi`
-> Last updated: 2026-11-21.
+> Last updated: 2026-11-25.
 > Related long-term docs: [LITERATURE.md](LITERATURE.md) · [GSB_V1_BASELINE.md](GSB_V1_BASELINE.md) · [INFRA_AND_GOTCHAS.md](INFRA_AND_GOTCHAS.md)
 
 ---
@@ -158,9 +158,9 @@ Fetched directly from the live OpenStreetMap v0.6 API across 4 real cities spann
 
 ---
 
-## 2.3 Verified v0.5 Results: Sprint 4 6-Seed GSB v2 Matrix, Controls & Verifier-Upgrade Hysteresis (2026-11-21)
+## 2.3 Verified v0.5–v0.6 Results: Sprint 4 Full 6-Seed GSB v2 Matrix, Archive-Preserving Co-Evolution, 6-Seed OSM Transfer, `SciUnits` & `GeoAnalystBench` Baseline (2026-11-21 – 2026-11-25)
 
-All 34 Sprint 4 Wave 1A & 1B evaluation JSONs (`runs/v7_s4_wave1a_g4{a,b}/`, `runs/v7_s4_wave1b_g4{a,b}/`) passed strict auditing with **`usage.errors == 0`** (`python -m meta_rsi.eval.sprint4_summary`).
+All 59 Sprint 4 Wave 1A, 1B, and 1C evaluation JSONs (`runs/v7_s4_wave1{a,b,c}_g4{a,b}/`) passed strict auditing with **`usage.errors == 0`** and **`usage.calls >= n`** (`python -m meta_rsi.eval.sprint4_summary`; regenerated tables and figures in `runs/figures/`). Wave 1C ran cleanly on Vertex AI serverless MaaS (`google/gemma-4-26b-a4b-it-maas`, `api_key="gcloud"`, `VERTEX_MIN_INTERVAL_S=3.35`, parity-verified `24/24` on real OSM against Colab G4 vLLM), preserving `637.74 CU` on Colab for Wave S4-2 Dual-G4 weight training.
 
 ### 1. GSB v2 Multi-Seed Comparison & Single-Seed Controls (`eval450`, symmetric `26B-A4B → 26B-A4B`)
 
@@ -176,13 +176,36 @@ All 34 Sprint 4 Wave 1A & 1B evaluation JSONs (`runs/v7_s4_wave1a_g4{a,b}/`, `ru
 | `meta_T0` (fixed mid-latitude probe) | 6 | 23.6 ± 5.2% | 28.8 ± 2.6% | 13.0 ± 10.6% | 18.4 ± 22.1% | 41.2 ± 25.3% | 0.7 ± 0.7% | 29.8 ± 4.9% | 1.22 ± 0.23 |
 | `llm_judge` (static code-review rubric) | 6 | 39.5 ± 14.4% | 40.9 ± 11.6% | 36.7 ± 21.4% | 19.8 ± 10.0% | 17.6 ± 18.8% | 20.8 ± 21.2% | 37.1 ± 7.7% | 1.32 ± 0.10 |
 | `coev_tip_only` (Stage-2 from Stage-1 tip alone) | 6 | 37.1 ± 17.7% | 40.8 ± 14.4% | 29.6 ± 25.0% | 14.4 ± 10.8% | 27.4 ± 26.4% | 28.9 ± 30.7% | 36.1 ± 11.6% | 1.31 ± 0.18 |
+| **`arch_coev` (Archive-Preserving Co-Ev, Ours)** | **6** | **41.0 ± 13.6%** | **44.0 ± 12.0%** | **35.0 ± 18.0%** | **19.1 ± 14.5%** | 25.4 ± 20.7% | **21.1 ± 19.0%** | 37.1 ± 9.9% | 1.39 ± 0.27 |
 
-Key empirical observations from Wave 1A/1B:
+Key empirical observations from Wave 1A/1B/1C:
 - **6/6 Weak-Verifier Lock-In (`darwinx_soft`)**: Across all 6 paired seeds (`32.2 / 31.1 / 31.8 / 32.0 / 34.0 / 30.4%`), soft regression gating on `dev_low` remains strictly locked in around `31.9 ± 1.2%` (`CompV = 1.3 ± 1.1%`, `Lucky = 50.3 ± 3.6%`).
 - **6/6 Second-Order Lock-In under Fixed Mid-Lat Verifier (`meta_T0`)**: All 6 seeds fall at or below `seed.py` (`22.9 / 17.6 / 30.0 / 19.1 / 29.6 / 22.2%`, mean `23.6 ± 5.2%`); every converged run (`s0, s1, s3, s5`) adopts `gdf.estimate_utm_crs()` and crashes on polar/antimeridian test tasks (`Err = 55–60%`, `CompV = 0.0–1.7%`).
 - **Static LLM-as-a-Judge (`llm_judge`) Variance & UTM Blindspot**: Static rubric evaluation produces high seed variance (`30.0 / 51.1 / 48.0 / 32.7 / 56.2 / 19.1%`, mean `39.5 ± 14.4%`). In `s5`, the judge approved a harness prescribing `gdf.estimate_utm_crs()` (`InLoop = 63.3% vs OraDev = 26.7%`), causing the same second-order polar/antimeridian collapse (`ALL = 19.1%`, `Err = 54.2%`).
 - **Zero-Label Counterfactual Guidance vs. Oracle & Inference-Time Baselines**: At seed 0, `stage2_coev` (`62.9%`, `1.18` calls) outperforms both the 3-location `oracle_soft` upper bound (`55.3%`, `1.44` calls) and inference-time `runtime_meta.py` (`57.1%` at `2.61` calls, 2.2x inference cost), while zero-diagnostic `meta_gate_only` (`53.6%`, `HO = 60.7%`) nearly matches `oracle_soft`.
-- **Verifier-Upgrade Hysteresis (`coev_tip_only` vs. Archive-Preserving Co-Evolution)**: Restarting Stage 2 strictly from the Stage-1 UTM-locked tip (discarding `gen_000`) broke out on `s0` (`62.9%`), `s2` (`44.0%`), and `s5` (`46.2%`), but remained trapped at `g00` on `s1` (`16.7%`) and `s3` (`18.7%`). Audit of Wave 1B logs also identified two domain-neutral infrastructure issues — (i) `_strip_thinking_preamble` splitting on unquoted `</think>`/`<channel|>` inside Python comments (discarding 20–50% of proposals with `NameError`), and (ii) `build_failure_digest()` omitting `workspace_files` and `task_prompt` (blinding the Meta-Agent to `metadata.json` on `SciUnits`, where all 3 seeds of both `darwinx_soft` and `meta_soft` stayed at `7.1%`). Both fixes plus archive-preserving re-scoring (`extra_seed_harnesses` retaining `gen_000` alongside Stage-1 ancestors) are verified in unit tests and queued for Wave 1C.
+- **Archive-Preserving Co-Evolution (`arch_coev`) Resolves Verifier-Upgrade Hysteresis**: Retaining `gen_000` alongside re-scored Stage-1 ancestors (`extra_seed_harnesses` with `parent_gen=None` and fixed DGM fallback pool in `meta_rsi/archive.py`) lifted breakout rate from **3/6** (`coev_tip_only`: `62.9 / 16.7 / 44.0 / 18.7 / 34.0 / 46.2%`, SD `17.7%`) to **5/6** (`arch_coev`: `58.2 / 17.1 / 37.8 / 45.6 / 45.6 / 41.8%`, SD `13.6%`), rescuing previously trapped seeds `s3` (`18.7% → 45.6%`, `+26.9 pp`) and `s4` (`34.0% → 45.6%`, `+11.6 pp`). Across all 6 seeds, `arch_coev` leads all multi-seed methods (`41.0% ALL`, `44.0% Seen`), significantly outperforms fixed `meta_T0` (**`+17.4 ± 12.8 pp` ALL**, paired $t=3.33, p=0.0207$, 95% CI `[+8.1, +26.5]`; **`+22.0 ± 14.6 pp` HO**, $t=3.70, p=0.0140$, 95% CI `[+10.9, +31.9]`), and improves over `darwinx_soft` by `+9.1 pp` while slashing `Lucky` by `-31.2 pp` (`50.3% → 19.1%`) and lifting `CompV` **16.2×** (`1.3% → 21.1%`). On the single remaining trapped seed (`s1`, `17.1%`), `g01` recombined `estimate_utm_crs()` from `g-1` and `g02..g08` misdiagnosed the polar `RuntimeError` as an empty filtered GeoDataFrame.
+
+### 2. Zero-Shot Real OpenStreetMap 4-City Urban Transfer (6 Seeds, `n = 24`)
+Evaluating all 6 Wave 1C `arch_coev` harnesses zero-shot on live OpenStreetMap slices across Singapore (`1.29°N`), Xuzhou (`34.26°N`), Helsinki (`60.17°N`), and Tromsø (`69.65°N`):
+- **`arch_coev` (6 seeds)**: **`86.1 ± 26.2%` ALL**, **`0.0 ± 0.0%` Error**, **`13.9 ± 26.2%` SilW**, `1.28 ± 0.41` calls (`s0=91.7%, s1=100.0%, s2=33.3%, s3=100.0%, s4=91.7%, s5=100.0%`) — **5/6 seeds achieve `91.7%–100.0%`** (vs. `seed.py` `41.7%` and weak `darwinx_soft` `29.2%` with `70.8%` silent wrong).
+
+### 3. Non-GIS Cross-Domain Generalization (`SciUnits`, 3 Paired Seeds, `eval280`)
+
+| Configuration | Seeds | **ALL (`n=280`)** | **Seen (8)** | **Held-Out (4)** | **`Lucky`** | **`SilW`** | **`Err`** | Calls | Per-Seed ALL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `darwinx_soft` (`26B → 26B`, fixed digest) | 3 | 7.1 ± 0.0% | 12.5 ± 0.0% | 0.0 ± 0.0% | 57.5 ± 6.5% | 34.6 ± 5.6% | 0.7 ± 0.9% | 1.15 ± 0.01 | `7.1 / 7.1 / 7.1%` |
+| `meta_soft` (`26B → 26B`, fixed digest) | 3 | 7.1 ± 0.0% | 12.5 ± 0.0% | 0.0 ± 0.0% | 59.3 ± 2.9% | 33.6 ± 2.9% | 0.0 ± 0.0% | 1.16 ± 0.05 | `7.1 / 7.1 / 7.1%` |
+| `darwinx_soft` (`gem4h → 26B`, weak SI dev) | 3 | 7.1 ± 0.0% | 12.5 ± 0.0% | 0.0 ± 0.0% | **91.4 ± 0.4%** | 0.5 ± 0.5% | 1.0 ± 0.8% | 1.35 ± 0.05 | `7.1 / 7.1 / 7.1%` |
+| **`meta_soft` (`gem4h → 26B`, unit/sentinel probe)** | **3** | **10.4 ± 7.5%** | **14.4 ± 9.0%** | **5.0 ± 7.3%** | **75.4 ± 15.3%** | 10.8 ± 18.8% | 3.5 ± 3.2% | 1.20 ± 0.02 | **`9.6 / 3.2 / 18.2%`** |
+
+Key non-GIS mechanistic findings (zero domain hints, `minimal_meta_prompt=True`):
+1. **Meta-Agent synthesis bottleneck under symmetric `26B → 26B`**: Even with the fixed `workspace_files` + `task_prompt` digest, `26B` diagnosed unit/sentinel drift in rationales but never synthesized runtime `metadata.json` file-inspection code in 6 generations (`7.1%` across all 3 seeds for both gates).
+2. **Pure Goodhart lock-in under `darwinx_soft` (`gem4h → 26B`)**: With a capable domain-neutral Meta-Agent (`gemini-4-hydrogen`), `darwinx_soft` drove `dev_low` to `100.0%` on 3/3 seeds and inflated unseen `Lucky` to **`91.4 ± 0.4%`** (Held-Out `Lucky = 96.7%–97.5%`), scoring **`0.0%` on all 11 physics families** (`7.1%` = `control_weighted_sensor_mean` only).
+3. **Autonomous non-GIS discovery & isomorphic 2nd-order verifier-coverage gap (`meta_soft`, `gem4h → 26B`)**: Under label-free tabular invariance gating, `meta_soft` autonomously invented `inspect_workspace()`, dynamic `metadata.json` loading, `missing_sentinel` sanitization, affine `calibration`, and `SI_FACTORS` lookup (`in_loop`: `12.5% → 50.0%` on `s0`, `12.5% → 75.0%` on `s2`), slashing `SilW` to **`0.0%`** on both `s0` and `s2`, and breaking out on `s2` to **`18.2%` ALL / `13.3%` Held-Out / `0.0%` Err** (`pipe_darcy_headloss 45.0%`, held-out `projectile_range_envelope 46.7%`, `beam_bending_stress 15.0%`, `hydrostatic_dam_force 10.0%`). Code audit of `s0`/`s2` reveals *why* `Lucky` remained high (`86.4%` / `81.8%`): `_TABULAR_UNIT_PAIRS` in `meta_rsi/metamorphic.py` applies a single deterministic mostly-metric pair per SI unit (`Pa → kPa`, `m3 → L`, `K → degC`, `W → kW`), leaving Imperial test units (`psi`, `ft3`, `gal_us`, `degF`, `hp`, `lbf`, `lb/ft3`, `in4`) uncovered — reproducing the exact same static-verifier coverage boundary as GSB v2 `meta_T0` in a completely non-GIS scientific domain.
+
+### 4. External `GeoAnalystBench` Baseline Audit (`n = 17` Metric/CRS/Raster Python Tasks)
+Zero-shot baseline for frozen `google/gemma-4-26B-A4B-it` (`runs/v7_s4_wave1c_g4a/eval_geoanalyst_base_26b.json`, `uerr=0`, `calls=17`):
+- `syntax_ok = 88.2%`, `uses_3857_all = 0.0%`, `projected_metric_vec = 71.4%`, **`dynamic_crs_vec = 0.0%`**, **`raster_nodata_safe = 25.0%`**, `crs_aligned = 88.9%`, **`strict_geo_sound = 58.8%`** — revealing large pre-internalization headroom on dynamic CRS selection (`0.0%`) and raster NoData masking (`25.0%`) for Wave S4-2 weight-level evaluation.
 
 ---
 
@@ -212,17 +235,20 @@ Key empirical observations from Wave 1A/1B:
 - [ ] **Two-Timescale Weight Internalization on GSB v2 (Wave S4-2)**: Run Dual-G4 Split `SFT-Weak` vs `SFT-Meta` + `GRPO-Metamorphic` (with certified probes) on GSB v2 `train[20:60]` and evaluate bare `seed.py` on `eval450`, real OSM, and `GeoAnalystBench`.
 
 ### Phase P2 — External Generalization & Publication
-- [x] **6-Seed GSB v2 Matrix + `llm_judge` & `oracle_soft` Controls** *(Wave 1A/1B done; Wave 1C Archive-Preserving Co-Ev & fixed `SciUnits` queued)*: Completed 6 seeds each of `darwinx_soft`, `meta_T0`, `llm_judge`, `coev_tip_only`, plus `runtime_meta`, `naive`, `meta_gate_only`, `oracle_soft`.
-- [ ] **External Benchmark Transfer**: Run deterministic CRS/metric/raster audit on 17 open-source `GeoAnalystBench` Python tasks (`meta_rsi/eval/geoanalyst_eval.py`) across Base, `SFT-Weak`, `SFT-Meta`, and `GRPO-Metamorphic` 26B weights.
-- [ ] **Non-GIS Cross-Domain Generalization (`SciUnits`)**: Run 3-seed fair `darwinx_soft` vs `meta_soft` (with `workspace_files` + `prompt` digest) and zero-label tabular verifier co-evolution on `data/sci_v1`.
+- [x] **6-Seed GSB v2 Matrix + Archive-Preserving Co-Ev + 6-Seed OSM** *(Wave 1A/1B/1C done 2026-11-25)*: Completed 6 seeds each of `darwinx_soft`, `meta_T0`, `llm_judge`, `coev_tip_only`, `arch_coev` (`41.0 ± 13.6%`, `+17.4 pp` vs `meta_T0` $p=0.0207$, 5/6 breakout), 6-seed real OSM transfer (`86.1 ± 26.2%`, 5/6 at `91.7%–100.0%`), plus `runtime_meta`, `naive`, `meta_gate_only`, `oracle_soft`.
+- [x] **Non-GIS Cross-Domain Generalization (`SciUnits`, Wave 1C)** *(done 2026-11-25)*: Completed 3-seed paired symmetric `26B → 26B` (`7.1%` vs `7.1%`, Meta-Agent synthesis bottleneck) and `gemini-4-hydrogen → 26B` (`darwinx` 3/3 locked at `7.1% / 91.4% Lucky` vs `meta_soft` `10.4 ± 7.5%`, `s2 = 18.2% ALL / 13.3% HO / 0.0% Err`, revealing the isomorphic static tabular verifier coverage gap).
+- [ ] **External Benchmark Transfer (`GeoAnalystBench`)**: Base 26B audit completed (`strict_geo_sound = 58.8%`, `dynamic_crs_vec = 0.0%`, `raster_nodata_safe = 25.0%`); pending `SFT-Weak`, `SFT-Meta`, and `GRPO-Metamorphic` 26B LoRA evaluations after Wave S4-2.
 
 ---
 
 ## 5. Local Run & Artifact Registry (Gitignored Data)
 
 - `data/v1/`: 2,700 train + 480 test tasks (`tasks.jsonl` + variant directories).
+- `data/v2/`, `data/osm_eval/`, `data/sci_v1/`: 1,950 GSB v2 tasks, 24 live 4-city OSM tasks, and 760 non-GIS SciUnits tasks.
 - `results/zero_shot_v1/`: 5 zero-shot baselines (`e4b_think`, `e4b_think_hint`, `e4b_think_rules`, `q27_low`, `g26b_think`), rule & `gemini-decision-1` error labels, `caught_{base,rules}.json`.
 - `runs/v3_gis_s{0..3}_{naive,preserve,meta}/`, `runs/eval480/`, `runs/eval_ood/`: Canonical v0.2 4-seed archive and full-480 / Polar-440 evals.
 - `runs/v4_jitter_check.json`, `runs/v4_split_2g4_bench.json`: BF16 jitter floor and Dual-G4 split feasibility measurements.
 - `runs/v4_block1_evals/`, `runs/v4_wave1_evals/`, `runs/v4_coev_polar/`, `runs/v4_sym26b_evals/`, `runs/v4_sym26b_harnesses/`, `runs/v4_grpo/`: Complete v4 ablation, co-evolution, symmetric 26B, and E4B GRPO artifacts (all 45 JSONs `usage.errors == 0`).
 - `runs/v5_two_timescale/`: Complete A3 Dual-G4 26B Two-Timescale RSI artifacts — disjoint `train[20:55]` trajectories, `sft_weak` / `sft_meta` / `grpo_meta_final` summaries & full `eval480` JSONs, Gen-2 archive & `gen2_best_harness.py`, and trained bf16 LoRA checkpoint (`lora_grpo_meta_final/`, all 4 eval JSONs `usage.errors == 0`).
+- `runs/v6_gsb_v2_s3/`, `runs/v6_gsb_v2_s3b/`, `runs/v6_gsb_v2_s3b_stage2/`: GSB v2 single-seed 4-tier ladder, 3 certified probes, and live OSM baseline evaluations.
+- `runs/v7_s4_wave1{a,b,c}_g4{a,b}/`, `runs/figures/`: Complete audited Sprint 4 Wave 1A/1B/1C 6-seed GSB v2, 6-seed OSM, 3-seed `SciUnits` (symmetric + `gem4h`), `GeoAnalystBench` Base 26B audit, and regenerated publication tables & SVG figures (`summary_tables.md`, `summary_data.json`, `fig_gsb2_multiseed.svg`; all 59 JSONs `usage.errors == 0` & `calls >= n`).

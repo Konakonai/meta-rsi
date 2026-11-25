@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import threading
 import time
@@ -75,6 +76,54 @@ def _extract_interaction_text(payload: dict) -> str:
     if isinstance(payload.get("output_text"), str):
         return payload["output_text"]
     return ""
+
+
+_GCLOUD_TOKEN_LOCK = threading.Lock()
+_GCLOUD_TOKEN_CACHE: dict[str, object] = {"token": "", "fetched_at": 0.0}
+_GCLOUD_PACE_LOCK = threading.Lock()
+_GCLOUD_NEXT_SLOT = 0.0
+
+
+def _gcloud_wait_slot() -> None:
+    """Optional smooth client-side pacing for Vertex AI PayGo endpoints (avoids 429 storms)."""
+    min_iv = float(os.environ.get("VERTEX_MIN_INTERVAL_S", "0.0") or "0.0")
+    if min_iv <= 0.0:
+        return
+    global _GCLOUD_NEXT_SLOT
+    with _GCLOUD_PACE_LOCK:
+        now = time.monotonic()
+        wait_s = max(0.0, _GCLOUD_NEXT_SLOT - now)
+        _GCLOUD_NEXT_SLOT = max(now, _GCLOUD_NEXT_SLOT) + min_iv
+    if wait_s > 0.0:
+        time.sleep(wait_s)
+
+
+def _get_gcloud_access_token(force_refresh: bool = False) -> str:
+    """Fetch and cache a gcloud OAuth access token (refreshes every 40 min or on 401)."""
+    now = time.time()
+    with _GCLOUD_TOKEN_LOCK:
+        tok = str(_GCLOUD_TOKEN_CACHE.get("token") or "")
+        age = now - float(_GCLOUD_TOKEN_CACHE.get("fetched_at") or 0.0)
+        if not force_refresh and tok and age < 2400.0:
+            return tok
+        last_exc: Exception | None = None
+        for attempt in range(5):
+            try:
+                new_tok = subprocess.check_output(
+                    ["gcloud", "auth", "print-access-token", "--quiet"],
+                    text=True,
+                    timeout=30,
+                ).strip()
+                if new_tok:
+                    _GCLOUD_TOKEN_CACHE["token"] = new_tok
+                    _GCLOUD_TOKEN_CACHE["fetched_at"] = time.time()
+                    return new_tok
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(min(2.0 * (attempt + 1), 10.0))
+        if tok:
+            return tok
+        raise RuntimeError(f"Failed to fetch gcloud access token: {last_exc}")
 
 
 class LLMClient:
@@ -144,15 +193,23 @@ class LLMClient:
             "temperature": temp,
             "max_tokens": mtok,
         }
-        # Pass vLLM chat_template_kwargs for Gemma 4 / Qwen thinking toggle.
+        # Pass vLLM / Vertex Gemma 4 chat_template_kwargs for thinking toggle.
         payload["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
         body = json.dumps(payload).encode()
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        use_gcloud = self.api_key == "gcloud"
+        max_tries = max(retries, 24) if use_gcloud else retries
         url = f"{self.base_url}/chat/completions"
         last_err = ""
-        for i in range(retries):
+        force_refresh = False
+        for i in range(max_tries):
+            if use_gcloud:
+                _gcloud_wait_slot()
+            headers = {"Content-Type": "application/json"}
+            if use_gcloud:
+                headers["Authorization"] = f"Bearer {_get_gcloud_access_token(force_refresh=force_refresh)}"
+                force_refresh = False
+            elif self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
             req = urllib.request.Request(url, body, headers)
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -170,14 +227,23 @@ class LLMClient:
                 )
             except urllib.error.HTTPError as e:
                 last_err = f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}"
-                if e.code in (429, 500, 502, 503, 504) and i < retries - 1:
-                    time.sleep(min(2 ** i, 16))
+                if e.code == 401 and use_gcloud and i < max_tries - 1:
+                    force_refresh = True
+                    time.sleep(1.0)
+                    continue
+                if e.code in (429, 500, 502, 503, 504) and i < max_tries - 1:
+                    ra = e.headers.get("Retry-After") if e.headers else None
+                    try:
+                        wait_s = float(ra) if ra else min(2.0 * (1.5 ** i), 25.0)
+                    except ValueError:
+                        wait_s = min(2.0 * (1.5 ** i), 25.0)
+                    time.sleep(wait_s + random.uniform(0.5, 2.5))
                     continue
                 return LLMResponse(text="", model=self.model, raw_error=last_err)
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as e:
                 last_err = str(e)
-                if i < retries - 1:
-                    time.sleep(min(2 ** i, 16))
+                if i < max_tries - 1:
+                    time.sleep(min(2 ** i, 20) + random.uniform(0.2, 1.5))
                     continue
                 return LLMResponse(text="", model=self.model, raw_error=last_err)
         return LLMResponse(text="", model=self.model, raw_error=last_err)

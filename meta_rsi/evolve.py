@@ -257,7 +257,7 @@ def run_evolution(
             sa = anc_dev["summary"]
             ea = ArchiveEntry(
                 gen=anc_gen,
-                parent_gen=0,
+                parent_gen=None,
                 harness_path=str(anc_harness),
                 rationale=f"Stage-1 archive ancestor ({anc_p.name}) re-scored under upgraded verifier",
                 dev_low_rate=sa["dev_low_rate"],

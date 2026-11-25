@@ -250,6 +250,8 @@ class LineageArchive:
             return parent, partner
 
         pool = [e for e in self.entries if e.gen > 0] if len(self.entries) > 1 else self.entries
+        if not pool:
+            pool = self.entries
         weights = []
         for e in pool:
             score_w = 0.25 + e.in_loop_rate
