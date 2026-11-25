@@ -74,3 +74,51 @@ With 6 seeds the smallest sign-flip p is 0.031, so no Holm-adjusted p can fall b
 - The blind-variant analysis specified above.
 
 **Reporting.** The unified table replaces the §2.3.1 multi-seed table as the main 6-seed result in `docs/RESEARCH.md`, and the original numbers stay alongside it. Whichever reading holds is reported.
+
+## Addendum 2: amendments after independent review (2026-11-25, 23:10 CST, before any unified analysis)
+
+An independent reviewer (Antigravity, `gemini-4-carbon-high`, read-only; `runs/agent_mail/carbon_review_1.md`) found flaws in the two sections above. The amendments below were fixed before any unified or blind comparison was computed.
+
+Disclosure of what was seen first:
+- 26 of 48 `A_rep1` evals and 15 `.blind.json` files (seeds 1–5 of `meta_gate_only`, `naive`, `oracle_soft`, written 21:35–22:31) were on disk.
+- The reviewer ran `score_blind.summarize` on those 15 files and quoted one result in its review: `oracle_soft − naive` in the ≥15° bin, interval [+1.3, +21.4].
+- While checking run status I (Claude Code, who writes the analysis) saw one log line with the held-out accuracy of one unidentified harness. No other unified or blind number was read.
+- Every amendment either makes the decision rule stricter or adds an analysis. The original analyses are still reported.
+
+**1. Decision rule (replaces the bootstrap rule of Addendum 1).**
+- With 6 seed clusters the percentile bootstrap is too narrow. Its standard error is biased by a factor √(5/6), and it uses normal rather than t₅ quantiles. Under the null, "interval excludes 0" fires about 13% of the time instead of 5%, and far more often across 14 comparisons.
+- There is now **one confirmatory comparison**: `arch_coev − naive` on the primary outcome. It is established only if the exact two-sided sign-flip test over the 6 seeds gives p < 0.05, which requires all 6 seeds to agree in sign. It is reported with a 95% t₅ interval on the 6 seed-level differences.
+- **All other comparisons are descriptive**: every method against `naive` and against `arch_coev`, under both protocols, and for blind accuracy. They are reported with Bonferroni-simultaneous t₅ intervals over the 14 primary-outcome comparisons (per-comparison level 1 − 0.05/14), together with unadjusted and Holm-adjusted sign-flip p. The seeds × families bootstrap is kept as a descriptive interval only. No descriptive comparison is called significant or established.
+- Seeds are not added after seeing these results. The earlier suggestion of seeds 6–9 is withdrawn.
+
+**2. Search budget is reported with every 6-seed result.**
+- `arch_coev` and `coev_tip_only` run 8 Stage-2 generations on top of a 6-generation Stage-1 archive (14 candidate generations). Every other method runs 6.
+- The 3 certified probes used by `meta_gate_only`, `coev_tip_only` and `arch_coev` (and by the Wave S4-2 filter and GRPO reward) were certified once, by `gemini-4-hydrogen` (`runs/v6_gsb_v2_s3b/verifier_r*_gem4h.json`), and reused for every seed.
+- Test-time calls per task are reported alongside.
+
+**3. Seed-0 readings (replaces Addendum 1).**
+- The statistic is the mean, over `naive`, `meta_gate_only` and `oracle_soft`, of the unified seed-0 gap. Each method's gap is also shown.
+- Mean ≤ 4 pp: the original seed-0 numbers reflect eval drift.
+- Mean > 10 pp: the seed-0 advantage lives in the evolved harness itself, not in the eval server. A re-evaluation cannot tell whether that comes from the seed-0 dev split or from search luck, and no claim is made either way.
+- In between: reported as is.
+- For `coev_tip_only` and `arch_coev` the seed-0 gap is not interpreted, since their probes were certified once and reused.
+
+**4. Backend check (the drop rule is unchanged, the comparison is tightened).**
+- Report the signed mean of rep 1 − rep 2 and the mean of |rep 1 − rep 2|.
+- Compare reused harnesses with fresh harnesses of single-call methods only: seed 0 of `naive`, `meta_gate_only` and `oracle_soft`, plus all `darwinx_soft` and `meta_T0` harnesses.
+- Repeat 1 of the 15 reused harnesses is dropped from every analysis (Protocol A, A→B, blind) if either the mean |gap| exceeds the fresh single-call mean by more than 2 pp, or |signed mean| exceeds 2 pp.
+
+**5. Added checks.**
+- Protocol A accuracy on the 100-task Protocol B subset against all 450 tasks, per method.
+- Silent failures (`lucky` + `silent_wrong`) and loud failures (`error`) are always reported together. A lower silent-failure rate is never reported as a win without the matching error rate. The primary endpoint stays `correct`.
+
+**6. Blind variants: added strata and a narrower reading.**
+- The original strata stay as pre-registered. The signed probe-latitude distance puts every 80–89°S variant in the ≥15° bin, although the polar probe at 86°N exercises the same mechanism there: UTM is undefined beyond 84°N / 80°S.
+- Added stratum: distance in |latitude| to the probes' |latitude| (58.3, 56.2, 86.0), with the same bins.
+- Added stratum: mechanism domains.
+  - equatorial weak-proxy zone (|lat| ≤ 8°);
+  - UTM-valid zone (8° < |lat|, lat ≤ 84°N, lat ≥ 80°S);
+  - polar zone beyond the UTM limits;
+  - antimeridian-crossing scenes, listed but not analysed (n = 2).
+- Added: blind accuracy weighted by cos(latitude), to undo the 25% share given to the 80–89° band, which covers 1.5% of the sphere.
+- **Reading 1 is narrowed.** Blind relocation tests whether a method generalizes across positions within the failure mechanisms the probes exercise (Web Mercator distortion away from the equator, UTM domain limits). It cannot test generalization to mechanisms the probes do not exercise. Reading 1 therefore becomes "the gain is not tied to the probes' coordinates". A positive result is not evidence against M1's broader point that the probes and the designed variants share failure mechanisms; that needs held-out mechanisms, which `data/v2_blind` does not contain.
