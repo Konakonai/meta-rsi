@@ -173,13 +173,22 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000) -> dic
             row = {"method": mth, "seeds": seeds, "diff": float(np.mean(diffs)), "per_seed_diff": diffs,
                    "sign_flip_p": sign_flip_p(diffs),
                    "boot_ci95": hier_bootstrap_ci(x1[:, ok], x2[:, ok], fam[ok], n_boot=n_boot)}
-            # where the difference lives: per stratum, seed-paired mean difference
+            # where the difference lives: per stratum, seed-paired mean difference + 95% hierarchical bootstrap CI
             row["by_stratum"] = {}
+            row["by_stratum_ci95"] = {}
+            row["by_stratum_p"] = {}
             for s in all_strata:
                 sa, sb = seed_matrix(mth, s), seed_matrix(ref, s)
                 ss = sorted(set(sa) & set(sb))
                 if ss:
-                    row["by_stratum"][s] = float(np.mean([np.nanmean(sa[k] - sb[k]) for k in ss]))
+                    s_x1, s_x2 = np.stack([sa[k] for k in ss]), np.stack([sb[k] for k in ss])
+                    s_ok = ~np.isnan(s_x1).any(0) & ~np.isnan(s_x2).any(0)
+                    if not s_ok.any():
+                        continue
+                    s_diffs = [float(np.mean(s_x1[i, s_ok] - s_x2[i, s_ok])) for i in range(len(ss))]
+                    row["by_stratum"][s] = float(np.mean(s_diffs))
+                    row["by_stratum_p"][s] = sign_flip_p(s_diffs)
+                    row["by_stratum_ci95"][s] = hier_bootstrap_ci(s_x1[:, s_ok], s_x2[:, s_ok], fam[s_ok], n_boot=n_boot)
             rows.append(row)
         for r, p in zip(rows, holm([r["sign_flip_p"] for r in rows])):
             r["holm_p"] = p
@@ -199,8 +208,13 @@ def render(rep: dict) -> str:
         lines.append(f"\nvs {ref}: seed-paired difference (pp), sign-flip p, Holm p, 95% hierarchical bootstrap")
         for r in rows:
             lo, hi = r["boot_ci95"]
+            far_str = ""
+            if "probe_lat_dist:15-90" in r.get("by_stratum_ci95", {}):
+                flo, fhi = r["by_stratum_ci95"]["probe_lat_dist:15-90"]
+                fdiff = r["by_stratum"]["probe_lat_dist:15-90"]
+                far_str = f"  | >=15deg: {100 * fdiff:+.1f} [{100 * flo:+.1f}, {100 * fhi:+.1f}]"
             lines.append(f"  {r['method']:16s} {100 * r['diff']:+6.1f}  p={r['sign_flip_p']:.3f}  holm={r['holm_p']:.3f}  "
-                         f"[{100 * lo:+.1f}, {100 * hi:+.1f}]  n_seeds={len(r['seeds'])}")
+                         f"[{100 * lo:+.1f}, {100 * hi:+.1f}]  n_seeds={len(r['seeds'])}{far_str}")
     return "\n".join(lines)
 
 

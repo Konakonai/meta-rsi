@@ -247,10 +247,29 @@ Every script passed only the weak check (correct on `low`). Its gate verdict is 
 | `darwinx_soft` s0 teacher (Wave S4-2 `SFT-Weak` data) | 181/493 | 20.4% (37/181) | 6.6% (12/181) | 1.3% (4/312) | 4.2% (13/312) | 97.3% |
 
 - The certified probes trade false rejections for false acceptances: they cut false acceptance (36.2% → 8.5% for the strong teacher) and raise false rejection about 3× for the two weaker sources (7.1% → 19.7%, 6.6% → 20.4%) and from 0.2% to 5.8% for the strong teacher.
-- Three GSB v2 families are not relocation-invariant by construction. `large_region_area_v2`, `large_route_length_v2` and `large_max_geodesic_span` are shifted in degrees, so their true answers differ by 11–21% (per-family median) across variants. They account for 22 of 36 false rejections (bare model) and 24 of 37 (`darwinx_soft` teacher).
-- `topological_containment_v2` has invariant truths but still loses 8 (bare model) and 9 (`darwinx_soft` teacher) correct scripts: some probe changes the data beyond the answer tolerance (not yet traced).
-- For the strong teacher, 17 of 23 rejections come from `probe_r3_km_units`. Seven are exact ~1000× unit errors (scripts that treat a km-unit projected CRS as metres). No oracle variant stores data in km, so these are latent bugs the benchmark does not grade rather than gate errors; the other 10 drift by 0–6× and are not yet traced.
-- Effect on distillation data: the bare model writes 25 oracle-correct `large_region_area_v2` scripts, and the metamorphic filter keeps 2 of them in `base_meta`, so `sft_base_meta` sees almost no correct examples of that family.
+
+**Why the gate rejects oracle-correct scripts** (`scripts/rebuttal/gate_rejection_causes.py`). Each rejection is replayed in the workspace of the probe that rejected it. The family's reference solver is run on that workspace too, which shows whether the probe preserves the answer. Each rejection gets the first matching cause:
+
+| Cause | Bare 26B | `stage2_coev` teacher | `darwinx_soft` teacher |
+|---|---|---|---|
+| Probe changes the reference answer (gate error) | 2 | 2 | 2 |
+| Layers left in different CRSs and combined without reprojecting (all `topological_containment_v2`) | 8 | 0 | 9 |
+| Projected coordinates read as metres (km probe; consistent again when the same probe uses metres) | 0 | 17 | 0 |
+| Stored coordinates treated as WGS84 degrees, or measured in the stored projection (Web Mercator / transverse Mercator storage) | 13 | 2 | 14 |
+| Continental scene moved over the pole, spanning more than 180° of longitude | 6 | 0 | 8 |
+| Other: answer preserved, script drifts 1–13% or crashes (not traced) | 7 | 2 | 4 |
+| Total false rejections | 36 | 23 | 37 |
+
+- Only 6 of the 96 rejections are gate errors, and they are the same two `raster_pop_exposure` tasks in every source. The polar probe resamples the hazard raster, some blocks cross the threshold, and the reference answer changes with them; the scripts follow it exactly.
+- Most rejections are scripts that fail on an input whose answer the probe preserves, in a regime the oracle variants never contain:
+  - layers stored in different CRSs, which these tasks' variants never do (they store every layer in one CRS);
+  - km-unit storage;
+  - large-extent data stored in a projection, e.g. `pyproj.Geod` applied to raw projected x/y, which returns NaN;
+  - large regions near the pole.
+- The oracle calls these scripts correct because GSB v2 never tests those inputs, not because the scripts handle them. "False rejection" in the table above therefore means disagreement with the benchmark's oracle; against a stricter oracle most of these would be true rejections.
+- Correction to the first reading of these results: the `large_*` truths differ across *oracle variants* (the shapes are translated in degrees), but the probes that rejected `large_*` scripts change the reference answer by at most 0.005%. Those rejections fall under the storage and polar rows, not under non-invariance.
+- The polar-wrap row is the least clear-cut. The scene the probe builds crosses the antimeridian near the pole, a case the oracle's large-extent variants (±140° longitude) exclude; only geodesic ring-area methods handle it.
+- Effect on distillation data: the bare model writes 25 oracle-correct `large_region_area_v2` scripts, and the metamorphic filter keeps 2 of them in `base_meta`, so `sft_base_meta` sees almost no examples of that family that the oracle grades correct. In this audit, 21 of the bare model's 36 rejections are `large_region_area_v2` scripts, and most of them fail under projected storage or over the pole (rows above).
 
 ### 2. Reference solutions on real OpenStreetMap tasks (`data/osm_global` + `data/osm_eval`, 120 tasks)
 
@@ -263,7 +282,7 @@ One reference solution per template (local azimuthal-equidistant projection; rep
 | `osm_north_half_bldg_count` (absolute position) | 7/8 | `probe_r2_polar_laea` (1) |
 | `osm_bldg_road_intersects_cnt` (exact-topology control) | 3/8 | `crs_storage_flip` (5): the reprojection round trip breaks shared-vertex contacts and counts drop by 2–6 |
 
-Implications: the gate is a high-precision filter (97–99% of passed scripts are oracle-correct), but its assumption that every probe preserves the answer fails for answers tied to absolute position (including 3 of the 20 GSB v2 families) and for probes that are not lossless. Results built on the gate should report its false-rejection rate and the families in which it systematically discards correct solutions.
+Implications: the gate is a high-precision filter (97–99% of passed scripts are oracle-correct). On GSB v2 it rarely rejects a script whose answer is right for the probe's input (6 of 96 rejections). Most of what it rejects fails on inputs the oracle does not test, so the measured false-rejection rate mostly reflects the oracle's coverage. The assumption that every probe preserves the answer does fail for answers tied to absolute position (the real-OSM latitude tasks) and for probes that are not lossless: thresholded aggregates over a resampled raster, and exact topology after a reprojection round trip. Results built on the gate should report its false-rejection rate against the oracle together with this breakdown.
 
 ---
 
@@ -276,7 +295,7 @@ Implications: the gate is a high-precision filter (97–99% of passed scripts ar
 | **R3** | **Missing baselines & seed count**: Need non-evolution baselines, Oracle/soft-DarwinX/LLM-judge controls, and ≥6–8 seeds. | **Non-evolution, soft-DarwinX & Oracle completed (2026-11-21); `llm_judge` & ≥6 seeds planned on GSB v2** | Completed `handcrafted` (`74.2%`), `runtime_meta` (`70.0%`), `darwinx_soft` ($\delta=0.14$), and `oracle`; scale full multi-seed matrix + `llm_judge` on GSB v2. |
 | **R4** | **Swallowed-exception degradation**: Rule-heavy prompts and OOD fallbacks silently swallow exceptions. | **Resolved & ablated (2026-11-21)** | Domain-neutral `sys.monitoring` telemetry broke 2nd-order `except RuntimeError: EPSG:3857` lock-in during polar co-evolution (`16.7% → 88.9%` in-loop). |
 | **R5** | **Bounded iteration vs true RSI**: Fixed human-written `metamorphic.py` + closed-API Meta-Agent. | **Core mechanisms verified (2026-11-21)** | Verified (a) non-circular self-certified verifier co-evolution, (b) 100% open-weight symmetric `26B → 26B` evolution, and (c) Dual-G4 Two-Timescale Harness → SFT + GRPO-Metamorphic → Gen-2 compounding (`36.5% → 93.3%`). |
-| **R6** | **Gate false rejections on non-invariant answers**: the metamorphic gate assumes every probe preserves the answer. | **Measured (2026-11-25), open** | Section 2.4: the full gate rejects 5.8–20.4% of oracle-correct scripts; 3 of 20 GSB v2 families are not relocation-invariant; correct real-OSM latitude solutions are rejected 8/8. Next: exclude or re-specify probes for non-invariant families, report the false-rejection rate next to every gate result, trace the `topological_containment_v2` and km-unit cases. |
+| **R6** | **Gate false rejections**: the metamorphic gate assumes every probe preserves the answer. | **Measured and traced (2026-11-25), open** | Section 2.4: the full gate rejects 5.8–20.4% of oracle-correct GSB v2 scripts, but only 6 of 96 rejections are gate errors (the probe changes the reference answer); the rest fail on answer-preserving inputs the oracle does not test (mixed CRSs, km or projected storage, polar scenes). On real OSM, correct absolute-position solutions are rejected (latitude 8/8). Next: skip relocating probes for absolute-position answers, use sum- or majority-preserving resampling for thresholded rasters, and report the breakdown next to every gate result. |
 
 ---
 

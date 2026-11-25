@@ -66,4 +66,8 @@ def test_summary_pairs_seeds_and_splits_by_stratum(tmp_path):
     assert row["by_stratum"]["probe_lat_dist:0-5"] == pytest.approx(2 / 3)
     assert rep["methods"]["m"]["designed"]["mean"] == 0.5 and rep["methods"]["ref"]["designed"]["mean"] == 0.0
     assert row["by_stratum"]["designed"] == 0.5
-    assert "Blind-variant accuracy" in score_blind.render(rep)
+    assert row["by_stratum_ci95"]["designed"] == (pytest.approx(0.5), pytest.approx(0.5))
+    far_lo, far_hi = row["by_stratum_ci95"]["probe_lat_dist:15-90"]
+    assert far_lo <= row["by_stratum"]["probe_lat_dist:15-90"] <= far_hi
+    rendered = score_blind.render(rep)
+    assert "Blind-variant accuracy" in rendered and ">=15deg:" in rendered
