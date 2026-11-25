@@ -162,7 +162,7 @@ def _http_ok(url: str) -> bool:
 
 
 def _start_vllm(model: str, log_path: Path) -> subprocess.Popen:
-    subprocess.run(["pkill", "-9", "-f", "vllm|VLLM|EngineCore"], check=False)
+    subprocess.run(["pkill", "-9", "-f", "vllm.entrypoints|VLLM::|EngineCore"], check=False)
     time.sleep(3)
     cmd = [
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
@@ -245,7 +245,7 @@ def cmd_run(a: argparse.Namespace) -> None:
     finally:
         stop.set()
         if vllm is not None:
-            subprocess.run(["pkill", "-9", "-f", "vllm|VLLM|EngineCore"], check=False)
+            subprocess.run(["pkill", "-9", "-f", "vllm.entrypoints|VLLM::|EngineCore"], check=False)
     done = sum(is_clean(out / "evals" / f"{e['tag']}_{p}_rep{r}.json", expected_n(p)) for e, p, r in jobs)
     print(f"[unified] {done}/{len(jobs)} jobs clean in {time.time() - state['t0']:.0f}s; failed: {failed or 'none'}", flush=True)
     if failed:
