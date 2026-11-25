@@ -78,3 +78,59 @@ def test_summary_pairs_seeds_and_splits_by_stratum(tmp_path):
     assert row["by_stratum"]["abs_lat_dist:0-5"] == pytest.approx(1 - (1 / 3 + 3 * 0.25) / 4)
     assert "all_cosw" in rep["methods"]["ref"] and "t_ci_bonf" in row
     assert "domain:polar" in row["by_stratum_t95"]
+
+
+def test_heldout_summary_strata_and_confirmatory(tmp_path):
+    """E2 held-out mechanisms: strata by mechanism / transfer, matched tasks, low-conditioned, and the confirmatory."""
+    root, out = tmp_path / "v2_heldout_mech", tmp_path / "out"
+    (out / "evals").mkdir(parents=True)
+    root.mkdir()
+    layout = {"t0": ["us_ft", "albers", "nodata_nan"], "t1": ["us_ft", "albers", "nodata_nan"],
+              "t2": ["us_ft"], "t3": ["csv_lon360"]}
+    transfer = {"us_ft": "near", "albers": "near", "nodata_nan": "far", "csv_lon360": "far"}
+    tasks = [{"task_id": tid, "family": f"f{i // 2}", "answer": "real", "large": False,
+              "variants": {m: {"dir": f"{tid}/{m}", "lat": 10.0, "lon": -20.0, "mechanism": m, "transfer": transfer[m],
+                               "truth": 1.0, "scored": True} for m in ms}}
+             for i, (tid, ms) in enumerate(layout.items())]
+    (root / "tasks.jsonl").write_text("".join(json.dumps(t) + "\n" for t in tasks))
+    assert score_blind.is_heldout({t["task_id"]: t for t in tasks})
+    assert score_blind.blind_path(Path("e/naive_s0_A_rep1.code.jsonl"), ".heldout.json").name == "naive_s0_A_rep1.heldout.json"
+
+    entries = []
+    for method in ("arch_coev", "naive"):
+        for s in range(6):
+            tag = f"{method}_s{s}"
+            entries.append({"tag": tag, "method": method, "seed": s})
+            # `naive` survives only the near-transfer mechanisms; `arch_coev` survives everything
+            recs = [{"task_id": t["task_id"], "family": t["family"], "variants": {
+                m: {"status": "ok", "value": 1.0, "correct": method == "arch_coev" or v["transfer"] == "near"}
+                for m, v in t["variants"].items()}} for t in tasks]
+            (out / "evals" / f"{tag}_A_rep1.heldout.json").write_text(json.dumps({"records": recs}))
+            low = [{"task_id": t["task_id"], "variants": {"low": {"correct": method == "arch_coev" or t["task_id"] == "t0"}}}
+                   for t in tasks]
+            (out / "evals" / f"{tag}_A_rep1.json").write_text(json.dumps({"records": low}))
+            # a blind file of the same eval must not leak into the held-out summary
+            (out / "evals" / f"{tag}_A_rep1.blind.json").write_text(json.dumps({"records": []}))
+    (out / "manifest.json").write_text(json.dumps({"entries": entries, "missing": []}))
+
+    rep = score_blind.summarize(out, root, ["naive"], n_boot=200)
+    assert rep["kind"] == "heldout"
+    nv = rep["methods"]["naive"]
+    assert nv["all"]["mean"] == pytest.approx((2 / 3 + 2 / 3 + 1 + 0) / 4)
+    assert nv["transfer:near"]["mean"] == pytest.approx(1.0)
+    assert nv["transfer:far"]["mean"] == pytest.approx(0.0)
+    assert nv["mech:csv_lon360"]["mean"] == pytest.approx(0.0)
+    assert nv["matched:near"]["mean"] == pytest.approx(1.0) and nv["matched:far"]["mean"] == pytest.approx(0.0)
+    assert "band:0-30" not in nv and "all_cosw" not in nv
+    # lowok: naive got only t0 right on `low`
+    assert nv["lowok:transfer:far"]["mean"] == pytest.approx(0.0)
+    assert rep["methods"]["arch_coev"]["lowok:transfer:far"]["mean"] == pytest.approx(1.0)
+
+    row = rep["vs_ref"]["naive"][0]
+    assert row["by_stratum"]["transfer:far"] == pytest.approx(1.0)
+    assert row["by_stratum"]["transfer:near"] == pytest.approx(0.0)
+    c = rep["confirmatory"]
+    assert (c["method"], c["ref"], c["stratum"]) == ("arch_coev", "naive", "transfer:far")
+    assert c["diff"] == pytest.approx(1.0) and c["sign_flip_p"] == pytest.approx(2 / 64) and c["established"]
+    text = score_blind.render(rep)
+    assert "CONFIRMATORY (E2)" in text and "ESTABLISHED" in text and "csv_lon360" in text

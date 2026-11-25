@@ -7,6 +7,9 @@ a script answers correctly, per task, averaged over a method's Protocol A repeat
 
     nix-shell --run "python scripts/rebuttal/score_blind.py score"     # -> <out>/evals/*.blind.json
     nix-shell --run "python scripts/rebuttal/score_blind.py summary"   # -> <out>/blind_summary.json
+
+The same two commands with `--blind data/v2_heldout_mech` score and summarize the held-out failure-mechanism
+variants of E2 (docs/NEXT_EXPERIMENTS.md) into `*.heldout.json` / `<out>/heldout_summary.json`.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ import re
 import sys
 import threading
 import time
+import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -37,6 +41,9 @@ LAT_DIST_BINS = ((0.0, 5.0), (5.0, 15.0), (15.0, 90.0))  # |lat - nearest reloca
 # Addendum 2: the probes' failure mechanisms are hemisphere-symmetric, so also bin by distance in |latitude|
 PROBE_ABS_LATS = (58.3, 56.2, 86.0)
 DOMAINS = ("equatorial", "utm_valid", "polar")  # |lat| <= 8; inside UTM's 84N / 80S limits; beyond them
+# E2 (docs/NEXT_EXPERIMENTS.md): held-out failure mechanisms; one confirmatory comparison on far transfer
+MECHS = ("us_ft", "albers", "nodata_nan", "csv_lon360")
+E2_CONFIRMATORY = ("arch_coev", "naive", "transfer:far")
 
 
 def abs_lat_dist(lat: float) -> float:
@@ -49,19 +56,38 @@ def domain(lat: float) -> str:
     return "polar" if (lat > 84.0 or lat < -80.0) else "utm_valid"
 
 
-def blind_path(code_file: Path) -> Path:
-    return code_file.with_name(code_file.name.replace(".code.jsonl", ".blind.json"))
+def blind_path(code_file: Path, suffix: str = ".blind.json") -> Path:
+    return code_file.with_name(code_file.name.replace(".code.jsonl", suffix))
 
 
 def load_blind(root: Path) -> dict[str, dict]:
     return {t["task_id"]: t for t in map(json.loads, open(root / "tasks.jsonl"))}
 
 
+def is_heldout(blind: dict[str, dict]) -> bool:
+    """True for the E2 held-out mechanism set (variants carry `mechanism`), False for the blind relocations."""
+    return any("mechanism" in v for t in blind.values() for v in t["variants"].values())
+
+
+def suffix_for(blind: dict[str, dict]) -> str:
+    return ".heldout.json" if is_heldout(blind) else ".blind.json"
+
+
 def cmd_score(a: argparse.Namespace) -> None:
     out, root = Path(a.out), Path(a.blind)
     blind = load_blind(root)
+    suffix = getattr(a, "suffix", "") or suffix_for(blind)
     tags = {e["tag"] for e in json.loads((out / "manifest.json").read_text())["entries"]}
     files = [f for f in sorted((out / "evals").glob("*.code.jsonl")) if (m := _CODE_RE.match(f.name)) and m["tag"] in tags]
+    # Optional priority ordering (e.g. naive & arch_coev first)
+    prio = [p.strip() for p in getattr(a, "prioritize", "").split(",") if p.strip()]
+    if prio:
+        def _rank(p: Path) -> tuple[int, str]:
+            for idx, pref in enumerate(prio):
+                if p.name.startswith(pref + "_"):
+                    return (idx, p.name)
+            return (len(prio), p.name)
+        files.sort(key=_rank)
     cache: dict[tuple[str, str], dict] = {}  # (code sha, variant dir) -> run; repeats at temp 0 often share code
     lock = threading.Lock()
 
@@ -80,7 +106,7 @@ def cmd_score(a: argparse.Namespace) -> None:
         return {"status": hit["status"], "value": val if val is None or np.isfinite(val) else str(val), "correct": bool(ok)}
 
     for f in files:
-        dst = blind_path(f)
+        dst = blind_path(f, suffix=suffix)
         rows = [json.loads(ln) for ln in open(f)]
         if dst.exists() and len(json.loads(dst.read_text()).get("records", [])) == len(rows):
             continue
@@ -104,7 +130,7 @@ def cmd_score(a: argparse.Namespace) -> None:
         n_all = sum(len(rec["variants"]) for rec in recs)
         dst.write_text(json.dumps({"source": f.name, "blind_root": str(root), "n_tasks": len(recs),
                                    "accuracy": n_ok / max(n_all, 1), "records": recs}))
-        print(f"[blind] {f.name}: {n_ok}/{n_all} = {n_ok / max(n_all, 1):.3f} ({time.time() - t0:.0f}s, cache {len(cache)})",
+        print(f"[{suffix.split('.')[1]}] {f.name}: {n_ok}/{n_all} = {n_ok / max(n_all, 1):.3f} ({time.time() - t0:.0f}s, cache {len(cache)})",
               flush=True)
 
 
@@ -122,9 +148,20 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
     task_ids = sorted(blind)
     tidx = {t: i for i, t in enumerate(task_ids)}
     fam = np.array([blind[t]["family"] for t in task_ids])
+    heldout = is_heldout(blind)
+    suffix = suffix_for(blind)
 
-    def strata(task: dict, vn: str) -> list[str]:
+    def strata(task: dict, vn: str, low_ok: bool) -> list[str]:
         v = task["variants"][vn]
+        if heldout:
+            s = ["all", f"mech:{v['mechanism']}", f"transfer:{v['transfer']}"]
+            # near and far cover different families (far is mostly the raster families): `matched` keeps only
+            # tasks that have both, so near vs far is not a family comparison
+            if {"near", "far"} <= {x["transfer"] for x in task["variants"].values() if x["scored"]}:
+                s.append(f"matched:{v['transfer']}")
+            if low_ok:  # robustness: the same script was correct on `low` in this eval
+                s += [f"lowok:transfer:{v['transfer']}", f"lowok:mech:{v['mechanism']}"]
+            return s
         s = ["all", f"band:{v['band']}"]
         if not task["large"]:
             s.append(f"probe_lat_dist:{_lat_bin(v['probe_lat_dist'])}")
@@ -136,8 +173,8 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
 
     # per (method, seed): list over repeats of {stratum: (n_tasks,) share correct, NaN where the task has none}
     per: dict[tuple[str, int], list[dict[str, np.ndarray]]] = defaultdict(list)
-    for f in sorted((out / "evals").glob("*.blind.json")):
-        m = re.match(r"^(?P<tag>.+)_A_rep(?P<rep>\d+)\.blind\.json$", f.name)
+    for f in sorted((out / "evals").glob(f"*{suffix}")):
+        m = re.match(r"^(?P<tag>.+)_A_rep(?P<rep>\d+)" + re.escape(suffix) + "$", f.name)
         if not m or m["tag"] not in tag_info:
             continue
         e = tag_info[m["tag"]]
@@ -145,19 +182,22 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
             continue  # pre-registered backend drop rule (decided by unified_summary's backend_check)
         num: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(len(task_ids)))
         den: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(len(task_ids)))
+        ev = f.with_name(f.name.replace(suffix, ".json"))
+        ev_recs = json.loads(ev.read_text()).get("records", []) if ev.exists() else []
+        low_ok = {r["task_id"] for r in ev_recs if r.get("variants", {}).get("low", {}).get("correct")}
         for rec in json.loads(f.read_text())["records"]:
             t = blind[rec["task_id"]]
             for vn, x in rec["variants"].items():
-                for s in strata(t, vn):
+                for s in strata(t, vn, rec["task_id"] in low_ok):
                     num[s][tidx[rec["task_id"]]] += x["correct"]
                     den[s][tidx[rec["task_id"]]] += 1
-                w = math.cos(math.radians(t["variants"][vn]["lat"]))  # area weight: undoes the band quotas
-                num["all_cosw"][tidx[rec["task_id"]]] += w * x["correct"]
-                den["all_cosw"][tidx[rec["task_id"]]] += w
+                if not heldout:
+                    w = math.cos(math.radians(t["variants"][vn]["lat"]))  # area weight: undoes the band quotas
+                    num["all_cosw"][tidx[rec["task_id"]]] += w * x["correct"]
+                    den["all_cosw"][tidx[rec["task_id"]]] += w
         # the same scripts on the designed non-low variants (high / polar / antimeridian / mid / zone_edge)
-        ev = f.with_name(f.name.replace(".blind.json", ".json"))
-        if ev.exists():
-            for rec in json.loads(ev.read_text()).get("records", []):
+        if ev_recs:
+            for rec in ev_recs:
                 if rec["task_id"] not in tidx:
                     continue
                 for vn, x in rec["variants"].items():
@@ -170,59 +210,115 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
     all_strata = sorted({s for reps in per.values() for r in reps for s in r})
 
     def seed_matrix(method: str, s: str) -> dict[int, np.ndarray]:
-        return {seed: np.nanmean(np.stack([r[s] for r in reps if s in r]), axis=0)
-                for (mm, seed), reps in per.items() if mm == method and any(s in r for r in reps)}
+        out_ = {}
+        for (mm, seed), reps in per.items():
+            if mm == method and any(s in r for r in reps):
+                with warnings.catch_warnings():  # all-NaN columns (no variant of the task in s) stay NaN
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    out_[seed] = np.nanmean(np.stack([r[s] for r in reps if s in r]), axis=0)
+        return out_
 
-    rep = {"blind_root": str(root), "drop_reused_rep1": drop_reused_rep1, "methods": {}, "vs_ref": {}}
+    def paired(mth: str, ref: str, s: str):
+        """Seed-paired per-seed mean differences on the tasks both methods have in stratum s, every seed."""
+        sa, sb = seed_matrix(mth, s), seed_matrix(ref, s)
+        ss = sorted(set(sa) & set(sb))
+        if not ss:
+            return None
+        x1, x2 = np.stack([sa[k] for k in ss]), np.stack([sb[k] for k in ss])
+        ok = ~np.isnan(x1).any(0) & ~np.isnan(x2).any(0)
+        if not ok.any():
+            return None
+        return ss, x1[:, ok], x2[:, ok], fam[ok], [float(np.mean(x1[i, ok] - x2[i, ok])) for i in range(len(ss))]
+
+    rep = {"blind_root": str(root), "kind": "heldout" if heldout else "blind", "drop_reused_rep1": drop_reused_rep1,
+           "methods": {}, "vs_ref": {}}
     for mth in methods:
         rep["methods"][mth] = {}
         for s in all_strata:
             sm = seed_matrix(mth, s)
-            if sm:
-                vals = [float(np.nanmean(x)) for x in sm.values()]
+            vals = [float(np.nanmean(x)) for x in sm.values() if not np.isnan(x).all()]  # lowok can be empty
+            if vals:
                 rep["methods"][mth][s] = {"seeds": sorted(sm), "mean": float(np.mean(vals)), "sd": float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0}
     for ref in refs:
         rows = []
         for mth in methods:
             if mth == ref:
                 continue
-            a, b = seed_matrix(mth, "all"), seed_matrix(ref, "all")
-            seeds = sorted(set(a) & set(b))
-            if not seeds:
+            pr = paired(mth, ref, "all")
+            if pr is None:
                 continue
-            x1, x2 = np.stack([a[s] for s in seeds]), np.stack([b[s] for s in seeds])
-            ok = ~np.isnan(x1).any(0) & ~np.isnan(x2).any(0)
-            diffs = [float(np.mean(x1[i, ok] - x2[i, ok])) for i in range(len(seeds))]
+            seeds, x1, x2, fm, diffs = pr
             row = {"method": mth, "seeds": seeds, "diff": float(np.mean(diffs)), "per_seed_diff": diffs,
                    "sign_flip_p": sign_flip_p(diffs),
                    "t_ci95": t_interval(diffs), "t_ci_bonf": t_interval(diffs, 1 - 0.05 / BONF_K),
-                   "boot_ci95": hier_bootstrap_ci(x1[:, ok], x2[:, ok], fam[ok], n_boot=n_boot)}
+                   "boot_ci95": hier_bootstrap_ci(x1, x2, fm, n_boot=n_boot)}
             # where the difference lives: per stratum, seed-paired mean difference + 95% hierarchical bootstrap CI
             row["by_stratum"] = {}
             row["by_stratum_ci95"] = {}
             row["by_stratum_p"] = {}
             row["by_stratum_t95"] = {}
             for s in all_strata:
-                sa, sb = seed_matrix(mth, s), seed_matrix(ref, s)
-                ss = sorted(set(sa) & set(sb))
-                if ss:
-                    s_x1, s_x2 = np.stack([sa[k] for k in ss]), np.stack([sb[k] for k in ss])
-                    s_ok = ~np.isnan(s_x1).any(0) & ~np.isnan(s_x2).any(0)
-                    if not s_ok.any():
-                        continue
-                    s_diffs = [float(np.mean(s_x1[i, s_ok] - s_x2[i, s_ok])) for i in range(len(ss))]
-                    row["by_stratum"][s] = float(np.mean(s_diffs))
-                    row["by_stratum_p"][s] = sign_flip_p(s_diffs)
-                    row["by_stratum_t95"][s] = t_interval(s_diffs)
-                    row["by_stratum_ci95"][s] = hier_bootstrap_ci(s_x1[:, s_ok], s_x2[:, s_ok], fam[s_ok], n_boot=n_boot)
+                pr = paired(mth, ref, s)
+                if pr is None:
+                    continue
+                _, s_x1, s_x2, s_fm, s_diffs = pr
+                row["by_stratum"][s] = float(np.mean(s_diffs))
+                row["by_stratum_p"][s] = sign_flip_p(s_diffs)
+                row["by_stratum_t95"][s] = t_interval(s_diffs)
+                row["by_stratum_ci95"][s] = hier_bootstrap_ci(s_x1, s_x2, s_fm, n_boot=n_boot)
             rows.append(row)
         for r, p in zip(rows, holm([r["sign_flip_p"] for r in rows])):
             r["holm_p"] = p
         rep["vs_ref"][ref] = rows
+    if heldout:  # E2's one confirmatory comparison: exact sign-flip over seeds, established only if p < 0.05
+        mth, ref, s = E2_CONFIRMATORY
+        pr = paired(mth, ref, s)
+        if pr is not None:
+            seeds, _, _, _, diffs = pr
+            p = sign_flip_p(diffs)
+            rep["confirmatory"] = {"method": mth, "ref": ref, "stratum": s, "seeds": seeds, "diff": float(np.mean(diffs)),
+                                   "per_seed_diff": diffs, "sign_flip_p": p, "t_ci95": t_interval(diffs),
+                                   "established": bool(p < 0.05)}
     return rep
 
 
+def render_heldout(rep: dict) -> str:
+    cols = (["designed", "all", "transfer:near", "transfer:far"] + [f"mech:{m}" for m in MECHS]
+            + ["matched:near", "matched:far", "lowok:transfer:near", "lowok:transfer:far"])
+    labels = [c.split(":")[-1] if c.split(":")[0] in ("transfer", "mech") or ":" not in c
+              else f"{c.split(':')[0][:5]}:{c.split(':')[-1]}" for c in cols]
+    lines = ["Held-out mechanism accuracy (E2; share of scored variants correct; mean over seeds). `near`: us_ft, albers;",
+             "`far`: nodata_nan, csv_lon360. `match`: only tasks with both near and far variants. `lowok`: only tasks the",
+             "same script got right on `low` (robustness; task sets differ by method, so descriptive only).",
+             "Drop reused rep 1: " + str(rep.get("drop_reused_rep1")),
+             f"{'method':16s} " + " ".join(f"{lab:>11s}" for lab in labels)]
+    for m, d in rep["methods"].items():
+        lines.append(f"{m:16s} " + " ".join(f"{100 * d[c]['mean']:10.1f}%" if c in d else f"{'-':>11s}" for c in cols))
+    if "confirmatory" in rep:
+        c = rep["confirmatory"]
+        lo, hi = c["t_ci95"]
+        lines.append(f"\nCONFIRMATORY (E2): {c['method']} - {c['ref']} on {c['stratum']}: {100 * c['diff']:+.1f} pp, "
+                     f"per seed [{', '.join(f'{100 * x:+.1f}' for x in c['per_seed_diff'])}], exact sign-flip "
+                     f"p={c['sign_flip_p']:.4f}, t5 95% [{100 * lo:+.1f}, {100 * hi:+.1f}], n_seeds={len(c['seeds'])} -> "
+                     + ("ESTABLISHED" if c["established"] else "not established"))
+    for ref, rows in rep["vs_ref"].items():
+        lines.append(f"\nvs {ref} (descriptive): seed-paired difference (pp) [t5 95%], sign-flip p")
+        for r in rows:
+            parts = []
+            for key in ("all", "transfer:near", "transfer:far", "matched:near", "matched:far"):
+                if key in r["by_stratum"] or key == "all":
+                    d = r["diff"] if key == "all" else r["by_stratum"][key]
+                    lo, hi = r["t_ci95"] if key == "all" else r["by_stratum_t95"][key]
+                    pv = r["sign_flip_p"] if key == "all" else r["by_stratum_p"][key]
+                    parts.append(f"{key.split(':')[0][:5] + ':' if key.startswith('matched') else ''}{key.split(':')[-1]} "
+                                 f"{100 * d:+.1f} [{100 * lo:+.1f}, {100 * hi:+.1f}] p={pv:.3f}")
+            lines.append(f"  {r['method']:16s} " + "  | ".join(parts) + f"  n_seeds={len(r['seeds'])}")
+    return "\n".join(lines)
+
+
 def render(rep: dict) -> str:
+    if rep.get("kind") == "heldout":
+        return render_heldout(rep)
     bins = [f"{lo:g}-{hi:g}" for lo, hi in LAT_DIST_BINS]
     cols = (["designed", "all", "all_cosw"] + [f"band:{b}" for b in BANDS] + [f"probe_lat_dist:{b}" for b in bins]
             + [f"abs_lat_dist:{b}" for b in bins] + [f"domain:{d}" for d in DOMAINS])
@@ -258,6 +354,8 @@ def main() -> None:
     s = sub.add_parser("score")
     s.add_argument("--workers", type=int, default=18)
     s.add_argument("--timeout", type=float, default=25.0)
+    s.add_argument("--suffix", default="", help="Output suffix (default: .heldout.json for the E2 set, else .blind.json)")
+    s.add_argument("--prioritize", default="", help="Comma-separated method prefixes to score first (e.g. naive,arch_coev)")
     m = sub.add_parser("summary")
     m.add_argument("--refs", default="naive,arch_coev")
     m.add_argument("--n-boot", type=int, default=4000)
@@ -274,7 +372,7 @@ def main() -> None:
                 raise SystemExit(f"{us} missing: run `python -m meta_rsi.eval.unified_summary {a.out}` first, or pass --drop-reused-rep1")
             drop = bool(json.loads(us.read_text())["backend_check"]["applied"])
         rep = summarize(Path(a.out), Path(a.blind), a.refs.split(","), a.n_boot, drop_reused_rep1=drop)
-        (Path(a.out) / "blind_summary.json").write_text(json.dumps(rep, indent=2))
+        (Path(a.out) / f"{rep['kind']}_summary.json").write_text(json.dumps(rep, indent=2))
         print(render(rep))
 
 
