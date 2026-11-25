@@ -74,6 +74,7 @@ def _run_metamorphic_check(
     include_domain_hint: bool = False,
     custom_probes: list[tuple[str, object]] | None = None,
     track_caught: bool = False,
+    rel_tol: float = 0.01,
 ) -> tuple[bool, str, dict]:
     """Label-free self-consistency check: run `code` on T(src_dir) and compare to `orig_val`.
 
@@ -114,7 +115,7 @@ def _run_metamorphic_check(
         pert_val = parse_final_number(res["stdout"])
         if pert_val is None:
             return False, f"METAMORPHIC_NO_NUMBER ({label}): did not print a valid number under perturbation.", {name: {"meta": pmeta, "status": "no_number"}}
-        consistent = matches(pert_val, orig_val, answer_type)
+        consistent = matches(pert_val, orig_val, answer_type, rel_tol=rel_tol)
         details[name] = {"meta": pmeta, "orig": orig_val, "pert": pert_val, "consistent": consistent}
         if not consistent:
             ratio = (pert_val / orig_val) if abs(orig_val) > 1e-12 else float("inf")

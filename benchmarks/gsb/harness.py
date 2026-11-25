@@ -35,12 +35,12 @@ def extract_code(completion: str) -> str | None:
     return (full or blocks)[-1]
 
 
-def matches(value: float, truth: float, answer: str) -> bool:
+def matches(value: float, truth: float, answer: str, rel_tol: float = REL_TOL) -> bool:
     if answer == "count":
         return abs(value - truth) < 0.5
     if answer == "coordinate":
         return abs(value - truth) <= COORD_ABS_TOL_DEG + 1e-9  # slack for float error at the rounding edge
-    return abs(value - truth) <= REL_TOL * max(abs(truth), 1e-12)
+    return abs(value - truth) <= rel_tol * max(abs(truth), 1e-12)
 
 
 def run_variant(code: str, data_dir: Path, timeout: float = 30.0, python: str = sys.executable) -> dict:
