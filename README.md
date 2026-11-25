@@ -35,7 +35,7 @@ Long-term project documentation lives under `docs/`:
 - Best evolved 4B no-think harness (`v3_gis_s2_meta`, `1.29` calls/task) reaches **81.9% ALL / 99.2% Held-out (119/120) / 1.0% lucky**, outperforming zero-shot thinking `gemma-4-26B-A4B-it` (`71.7%` ALL / `13.4%` lucky) by **+10.2%** and `Qwen3.8-27B` (`62.2%`) by **+19.7%** on the exact same 480 tasks.
 - On the **Polar OOD stress test** (`n=440` local tasks at `86.5°N / -85.5°S`, where `estimate_utm_crs()` raises `RuntimeError`), `metamorphic` fails **loudly** (`83.7%` Error, `2.7%` silent wrong) rather than returning silent distorted numbers (`Gen-0 Seed`: `65.9%` silent `Lucky+SilW`; `preserve`: `42.5%`).
 
-## Verified Results (v0.3–v0.6, Audited `usage.errors == 0`)
+## Verified Results (v0.3–v0.7, Audited `usage.errors == 0`)
 
 Full tables, paired statistics, and audit notes live in [docs/RESEARCH.md](docs/RESEARCH.md).
 
@@ -66,8 +66,13 @@ Single complete closed-loop run using zero closed APIs, zero 3-location oracle l
   - `coev_tip_only` (Stage-2 from Stage-1 tip alone, 6 seeds): **`37.1 ± 17.7%`** (`3/6` breakout; verifier-upgrade hysteresis on `s1, s3, s4`).
   - **`arch_coev` (Archive-Preserving Co-Evolution, Ours, 6 seeds)**: **`41.0 ± 13.6%` ALL / `44.0 ± 12.0%` Seen / `35.0 ± 18.0%` HO** (`5/6` breakout: `58.2 / 17.1 / 37.8 / 45.6 / 45.6 / 41.8%`) — leads all 6-seed methods, significantly beats fixed `meta_T0` (**`+17.4 pp` ALL, $p=0.0207$**; **`+22.0 pp` HO, $p=0.0140$**), slashes `Lucky` vs `darwinx_soft` by `-31.2 pp` (`50.3% → 19.1%`), and lifts `CompV` **16.2×** (`1.3% → 21.1%`).
 - **Zero-shot real OpenStreetMap 4-city transfer** (`data/osm_eval/`, 24 tasks across Singapore `1.29°N`, Xuzhou `34.26°N`, Helsinki `60.17°N`, Tromsø `69.65°N`): `seed.py` `41.7%` → weak `darwinx_soft` **`29.2%`** (`70.8%` silent wrong) → 6-seed `arch_coev` **`86.1 ± 26.2%`** (`0.0%` error, **5/6 seeds at `91.7%–100.0%`**; seed-0 `stage2_coev` `100.0%`).
+- **GSB v2 Two-Timescale Weight Internalization & Gen-2 Compounding (`runs/v8_s4_wave2_v2/`, `train[20:60]`, 100% open-weight `26B-A4B`)**:
+  - `SFT-Weak` (bare `seed.py`, 1.00 call): **`30.4%`** GSB v2 (`Lucky 48.0%`, `CompV 1.1%`) / **`12.5%`** real OSM (`0/12` Helsinki/Tromsø, `70.8%` silent wrong).
+  - `SFT-Meta` (bare `seed.py`, 1.00 call): **`56.2%`** GSB v2 (`CompV 69.4%`) / **`79.2%`** real OSM (`12/12` Helsinki/Tromsø).
+  - `+GRPO-Metamorphic` (24 steps w/ 3 certified probes, bare `seed.py`, 1.00 call): **`62.4%`** ALL / **`60.0%`** HO / **`83.3%`** `CompV` / **`91.7%`** real OSM (`0.0%` error, `+79.2 pp` over `SFT-Weak`).
+  - **Gen-2 Compounding** (`grpo_meta_final` + zero-GIS-rule generic retry, 1.09 calls): **`68.2%`** ALL / **`69.3%`** HO / **`0.7%`** error (`+5.3 pp` ALL and `+9.3 pp` HO above the multi-turn Gen-1 Teacher `62.9% / 60.0%`) and **`100.0%` (24/24)** real OSM (`1.04` calls).
 - **Non-GIS `SciUnits` (`eval280`, 3 seeds)**: Under `gemini-4-hydrogen → 26B` (domain-neutral prompt), `darwinx_soft` locks in `3/3` seeds at **`7.1 ± 0.0%` (`0.0%` HO, `91.4%` lucky)**, whereas `meta_soft` autonomously discovers dynamic `metadata.json` unit/calibration/sentinel loading (`s2` breaks out to **`18.2%` ALL / `13.3%` HO / `0.0%` error / `0.0%` silent wrong**, exposing the same static-verifier coverage boundary on Imperial units).
-- **External `GeoAnalystBench` baseline (`n=17`)**: Base `gemma-4-26B-A4B-it` scores `strict_geo_sound = 58.8%` (`dynamic_crs_vec = 0.0%`, `raster_nodata_safe = 25.0%`), ready for Wave S4-2 weight-internalization comparison.
+- **External `GeoAnalystBench` zero-shot transfer (`n=17`, `max_tokens=4096`, `100% syntax_ok`)**: Base `26B` `strict_geo_sound = 76.5%` (`dynamic_crs_vec = 0.0%`) → `SFT-Weak` degrades to **`64.7%`** (`raster_nodata_safe 75.0% → 37.5%`) → **`SFT-Meta` `88.2%`** / **`GRPO-Meta` `82.3%`** (both lifting `dynamic_crs_vec` from **`0.0% → 71.4%`** and cutting `uses_3857` `5.9% → 0.0%`).
 
 ## Repository Layout
 

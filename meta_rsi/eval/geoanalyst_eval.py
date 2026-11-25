@@ -241,10 +241,11 @@ def main() -> None:
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1")
     ap.add_argument("--out", required=True)
     ap.add_argument("--all-open-source", action="store_true")
+    ap.add_argument("--max-tokens", type=int, default=4096)
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
 
-    llm = LLMClient("openai-compat", a.model, base_url=a.url, temperature=0.0, max_tokens=2048, enable_thinking=False)
+    llm = LLMClient("openai-compat", a.model, base_url=a.url, temperature=0.0, max_tokens=a.max_tokens, enable_thinking=False)
     res = evaluate_geoanalyst(Path(a.csv), llm, metric_only=not a.all_open_source, workers=a.workers)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(json.dumps(res, indent=2))

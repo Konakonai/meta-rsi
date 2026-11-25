@@ -342,6 +342,31 @@ def summarize_gsb2(runs_dir: Path) -> dict:
             geoanalyst[label]["uerr"] = uerr
             geoanalyst[label]["calls"] = ucalls
 
+    # Wave S4-2 GSB v2 Two-Timescale Weight Internalization (eval450 + real OSM n=24)
+    wave2_v2 = {}
+    for label, fname in [
+        ("sft_weak_bare", "eval_v2_bare_seed_sft_weak.json"),
+        ("sft_meta_bare", "eval_v2_bare_seed_sft_meta.json"),
+        ("grpo_meta_bare", "eval_v2_bare_seed_grpo_meta_final.json"),
+        ("gen2_grpo_meta", "eval_v2_gen2_grpo_meta_final.json"),
+    ]:
+        p_w2 = _find_first(roots, [fname])
+        if p_w2:
+            wave2_v2[label] = extract_metrics(p_w2)
+            _audit_rec(f"wave2_v2:{label}", wave2_v2[label])
+
+    wave2_osm = {}
+    for label, fname in [
+        ("sft_weak_bare", "eval_osm_bare_seed_sft_weak.json"),
+        ("sft_meta_bare", "eval_osm_bare_seed_sft_meta.json"),
+        ("grpo_meta_bare", "eval_osm_bare_seed_grpo_meta_final.json"),
+        ("gen2_grpo_meta", "eval_osm_gen2_grpo_meta_final.json"),
+    ]:
+        p_w2o = _find_first(roots, [fname])
+        if p_w2o:
+            wave2_osm[label] = extract_metrics(p_w2o)
+            _audit_rec(f"wave2_osm:{label}", wave2_osm[label])
+
     return {
         "usage_error_violations": bad_uerr,
         "gsb2_multiseed": agg,
@@ -349,6 +374,8 @@ def summarize_gsb2(runs_dir: Path) -> dict:
         "osm_multiseed": osm_agg,
         "sci_multiseed": sci_agg,
         "geoanalyst": geoanalyst,
+        "wave2_v2": wave2_v2,
+        "wave2_osm": wave2_osm,
         "paired_tests": comparisons,
     }
 
@@ -409,6 +436,18 @@ def print_report(rep: dict) -> None:
                 f"proj_vec={100*g['projected_metric_vec']:5.1f}% dyn_crs={100*g['dynamic_crs_vec']:4.1f}% "
                 f"nodata={100*g['raster_nodata_safe']:5.1f}% align={100*g['crs_aligned']:5.1f}% "
                 f"strict_sound={100*g['strict_geo_sound']:5.1f}% (uerr={g['uerr']}, calls={g['calls']})"
+            )
+
+    if rep.get("wave2_v2"):
+        print("\n=== Wave S4-2 GSB v2 Two-Timescale Weight Internalization (eval450 + OSM n=24) ===")
+        for label, r in rep["wave2_v2"].items():
+            g = r["groups"]
+            osm_r = (rep.get("wave2_osm") or {}).get(label)
+            osm_s = f"OSM={100*osm_r['all']:5.1f}%" if osm_r else "OSM=-"
+            print(
+                f"{label:<18} | ALL={100*r['all']:5.1f}% Seen={100*r['seen']:5.1f}% HO={100*r['ho']:5.1f}% "
+                f"Lucky={100*r['lucky']:5.1f}% Err={100*r['error']:5.1f}% Calls={r['calls']:.2f} | "
+                f"CompV={100*g.get('CompV',0):5.1f}% Rast={100*g.get('Rast',0):5.1f}% Large={100*g.get('Large',0):5.1f}% | {osm_s}"
             )
 
     if rep["paired_tests"]:

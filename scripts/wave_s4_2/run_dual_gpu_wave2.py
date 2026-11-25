@@ -246,10 +246,12 @@ try:
         print("[w2-infer] lora_sync READY on :8003", flush=True)
 
     # Collect trajectories on w2-infer if not already pre-collected via Vertex AI
+    # Note: bundled data/v2/tasks.jsonl is pre-sliced to train[train_offset : train_offset+train_per_family],
+    # so remote train_offset inside the bundle is always 0.
     traj_dir = work / "wave2_assets" / "trajectories"
     traj_dir.mkdir(parents=True, exist_ok=True)
     t_pf = os.environ.get("W2_TRAIN_PER_FAMILY", "40")
-    t_off = os.environ.get("W2_TRAIN_OFFSET", "20")
+    t_off = "0"
 
     for name, teacher, mode, pdir in [
         ("weak_trajectories.jsonl", work / "wave2_assets/weak_teacher.py", "weak", ""),
@@ -379,7 +381,7 @@ try:
         "--tasks-per-step", "4",
         "--num-generations", "8",
         "--sync-every", "2",
-        "--train-offset", os.environ.get("W2_TRAIN_OFFSET", "20"),
+        "--train-offset", "0",
         "--train-per-family", os.environ.get("W2_TRAIN_PER_FAMILY", "40"),
         "--max-seq-len", os.environ.get("W2_MAX_SEQ_LEN", "2560"),
         "--max-completion-tokens", os.environ.get("W2_MAX_COMP_TOKENS", "1536"),

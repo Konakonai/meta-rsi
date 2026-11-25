@@ -544,13 +544,15 @@ def run_grpo_stage(
 
     final_name = f"{lora_prefix}_final"
     final_dir = _save_single_adapter(model, out_dir / final_name, adapter_name="policy")
-    final_sync = push_lora_adapter(
-        final_dir,
-        sync_url=sync_url,
-        lora_name=final_name,
-        unload_prev=prev_synced_temp,
-        cast_bf16=True,
-    )
+    final_sync = None
+    if sync_url:
+        final_sync = push_lora_adapter(
+            final_dir,
+            sync_url=sync_url,
+            lora_name=final_name,
+            unload_prev=prev_synced_temp,
+            cast_bf16=True,
+        )
     summary = {
         "stage": "grpo",
         "lora_name": final_name,
@@ -566,9 +568,168 @@ def run_grpo_stage(
     return summary
 
 
+def run_grpo_offline_batch(
+    model,
+    tokenizer,
+    *,
+    sft_adapter_dir: Path,
+    rollouts_jsonl: Path,
+    out_dir: Path,
+    save_lora_name: str,
+    opt_state_path: Path | None = None,
+    max_seq_len: int = 2560,
+    lr: float = 1e-5,
+    beta: float = 0.02,
+    clip_eps: float = 0.2,
+) -> dict:
+    """Run clipped GRPO + exact Schulman k3-KL steps on pre-scored rollouts (for single-GPU alternating GRPO)."""
+    import torch
+
+    if "sft_ref" not in model.peft_config:
+        model.load_adapter(str(sft_adapter_dir), adapter_name="sft_ref", is_trainable=False)
+    for name, p in model.named_parameters():
+        if "sft_ref" in name:
+            p.requires_grad_(False)
+    model.set_adapter("policy")
+    for name, p in model.named_parameters():
+        if "sft_ref" in name:
+            p.requires_grad_(False)
+        elif ".policy." in name:
+            p.requires_grad_(True)
+    trainable_params = [p for n, p in model.named_parameters() if p.requires_grad and "sft_ref" not in n]
+    assert trainable_params, "No trainable policy parameters found for GRPO offline batch"
+    opt = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=0.0)
+    if opt_state_path is not None and opt_state_path.exists():
+        try:
+            opt.load_state_dict(torch.load(str(opt_state_path), map_location="cuda"))
+            print(f"[grpo-batch] Restored optimizer state from {opt_state_path}", flush=True)
+        except Exception as exc:
+            print(f"[grpo-batch] Warning: could not restore opt state ({exc}); starting fresh AdamW", flush=True)
+
+    rows = [json.loads(ln) for ln in open(rollouts_jsonl)]
+    by_step: dict[int, list[dict]] = {}
+    for r in rows:
+        by_step.setdefault(int(r["step"]), []).append(r)
+
+    eos = tokenizer.eos_token or ""
+    step_logs: list[dict] = []
+    t_all = time.time()
+    torch.cuda.reset_peak_memory_stats()
+
+    for step in sorted(by_step):
+        items = by_step[step]
+        # Group size per task inside this step
+        by_task: dict[str, list[dict]] = {}
+        for it in items:
+            by_task.setdefault(it["task_id"], []).append(it)
+        ordered: list[dict] = []
+        advs: list[float] = []
+        for tid in by_task:
+            grp = by_task[tid]
+            ordered.extend(grp)
+            advs.extend(compute_group_advantages([float(x["reward"]) for x in grp], len(grp)))
+
+        rewards = [float(x["reward"]) for x in ordered]
+        cats = [x.get("cat", "") for x in ordered]
+        n3857 = sum(1 for x in ordered if x.get("uses_3857"))
+        n_full = sum(1 for r in rewards if r >= 0.99)
+        n_blocked = sum(1 for c in cats if c == "meta_fail_shortcut")
+
+        active_items = []
+        for it, adv in zip(ordered, advs):
+            comp = it.get("completion") or ""
+            if abs(adv) < 1e-8 or not comp.strip():
+                continue
+            p_ids = _format_prompt_ids(tokenizer, SEED_SYSTEM_PROMPT, it["prompt"])
+            c_ids = tokenizer(comp + eos, add_special_tokens=False)["input_ids"]
+            if len(c_ids) < 2:
+                continue
+            inp, lab = build_masked_sequence(p_ids, c_ids, max_seq_len)
+            active_items.append((inp, lab, adv))
+
+        t_tr = time.time()
+        mean_kl = 0.0
+        mean_loss = 0.0
+        if active_items:
+            ref_logps_list = []
+            old_logps_list = []
+            model.eval()
+            with torch.no_grad():
+                model.set_adapter("sft_ref")
+                for inp, lab, _ in active_items:
+                    inp_t = torch.tensor([inp], dtype=torch.long, device="cuda")
+                    lab_t = torch.tensor([lab], dtype=torch.long, device="cuda")
+                    rlp, _ = _sequence_token_logps(model, inp_t, lab_t)
+                    ref_logps_list.append(rlp.detach())
+                model.set_adapter("policy")
+                for inp, lab, _ in active_items:
+                    inp_t = torch.tensor([inp], dtype=torch.long, device="cuda")
+                    lab_t = torch.tensor([lab], dtype=torch.long, device="cuda")
+                    olp, _ = _sequence_token_logps(model, inp_t, lab_t)
+                    old_logps_list.append(olp.detach())
+
+            model.set_adapter("policy")
+            model.train()
+            opt.zero_grad(set_to_none=True)
+            denom = float(len(active_items))
+            for (inp, lab, adv), ref_lp, old_lp in zip(active_items, ref_logps_list, old_logps_list):
+                inp_t = torch.tensor([inp], dtype=torch.long, device="cuda")
+                lab_t = torch.tensor([lab], dtype=torch.long, device="cuda")
+                cur_lp, mask = _sequence_token_logps(model, inp_t, lab_t)
+                m = mask.float()
+                n_tok = m.sum().clamp(min=1.0)
+                ratio = torch.exp((cur_lp - old_lp).clamp(-10.0, 10.0))
+                surr1 = ratio * adv
+                surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv
+                pg_loss = -torch.min(surr1, surr2)
+                log_ref = (ref_lp - cur_lp).clamp(-10.0, 10.0)
+                kl = torch.exp(log_ref) - log_ref - 1.0
+                loss = ((pg_loss + beta * kl) * m).sum() / n_tok
+                (loss / denom).backward()
+                mean_kl += float(((kl * m).sum() / n_tok).detach().item()) / denom
+                mean_loss += float(loss.detach().item()) / denom
+            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+            opt.step()
+        train_s = round(time.time() - t_tr, 2)
+        rec = {
+            "step": step,
+            "mean_r": round(sum(rewards) / max(len(rewards), 1), 4),
+            "n_full": n_full,
+            "n_meta_blocked": n_blocked,
+            "n_3857": n3857,
+            "n_rollouts": len(rewards),
+            "n_active": len(active_items),
+            "loss": round(mean_loss, 5),
+            "kl": round(mean_kl, 5),
+            "train_s": train_s,
+        }
+        step_logs.append(rec)
+        print(
+            f"[grpo-batch:{save_lora_name}] step={step:2d} mean_r={rec['mean_r']:.3f} "
+            f"full={n_full:2d}/{len(rewards)} blocked={n_blocked:2d} 3857={n3857:2d} "
+            f"act={len(active_items):2d} kl={mean_kl:.4f} (tr={train_s}s)",
+            flush=True,
+        )
+
+    saved_dir = _save_single_adapter(model, out_dir / save_lora_name, adapter_name="policy")
+    if opt_state_path is not None:
+        torch.save(opt.state_dict(), str(opt_state_path))
+    summary = {
+        "stage": "grpo_offline_batch",
+        "lora_name": save_lora_name,
+        "adapter_dir": str(saved_dir),
+        "rollouts_jsonl": str(rollouts_jsonl),
+        "train_s": round(time.time() - t_all, 1),
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
+        "steps": step_logs,
+    }
+    (out_dir / f"{save_lora_name}_summary.json").write_text(json.dumps(summary, indent=2))
+    return summary
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Dual-G4 Split Two-Timescale SFT + GRPO Trainer")
-    ap.add_argument("--mode", required=True, choices=["sft", "grpo", "sft_and_grpo"])
+    ap.add_argument("--mode", required=True, choices=["sft", "grpo", "sft_and_grpo", "grpo_offline_batch"])
     ap.add_argument("--model", default="google/gemma-4-26B-A4B-it")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--data-root", default="data/v1")
@@ -579,7 +740,11 @@ def main() -> None:
         default=[],
         help="Optional additional independent SFT adapters trained on the same loaded base model (format: name=path.jsonl)",
     )
-    ap.add_argument("--sft-lora-dir", default="", help="Existing SFT adapter dir when --mode grpo")
+    ap.add_argument("--sft-lora-dir", default="", help="Existing SFT anchor adapter dir when --mode grpo/grpo_offline_batch")
+    ap.add_argument("--init-lora-dir", default="", help="Optional starting policy adapter dir when --mode grpo_offline_batch")
+    ap.add_argument("--rollouts-jsonl", default="", help="Pre-scored rollouts JSONL for --mode grpo_offline_batch")
+    ap.add_argument("--save-lora-name", default="grpo_meta_final", help="Output adapter name for --mode grpo_offline_batch")
+    ap.add_argument("--opt-state-path", default="", help="Optional AdamW state path persisted across alternating GRPO rounds")
     ap.add_argument("--sft-lora-name", default="sft_meta")
     ap.add_argument("--sft-epochs", type=int, default=2)
     ap.add_argument("--sft-lr", type=float, default=1e-4)
@@ -630,6 +795,7 @@ def main() -> None:
         base.gradient_checkpointing_enable()
         base.enable_input_require_grads()
 
+        sync_url = (a.sync_url or "").strip() or None
         if a.mode in {"sft", "sft_and_grpo"}:
             targets = discover_lm_lora_targets(base)
             print(f"[split-2ts] Discovered {len(targets)} LM LoRA targets (sample: {targets[:3]})", flush=True)
@@ -662,7 +828,7 @@ def main() -> None:
                     batch_size=a.sft_batch_size,
                     max_seq_len=a.max_seq_len,
                     seed=a.seed,
-                    sync_url=a.sync_url,
+                    sync_url=sync_url,
                     lora_name=ctrl_name,
                     adapter_key=ctrl_name,
                 )
@@ -679,18 +845,32 @@ def main() -> None:
                 batch_size=a.sft_batch_size,
                 max_seq_len=a.max_seq_len,
                 seed=a.seed,
-                sync_url=a.sync_url,
+                sync_url=sync_url,
                 lora_name=a.sft_lora_name,
                 adapter_key="policy",
             )
             sft_dir = Path(sft_res["adapter_dir"])
         else:
             sft_dir = Path(a.sft_lora_dir)
-            model = PeftModel.from_pretrained(base, str(sft_dir), adapter_name="policy", is_trainable=True)
+            init_dir = Path(a.init_lora_dir) if a.init_lora_dir else sft_dir
+            model = PeftModel.from_pretrained(base, str(init_dir), adapter_name="policy", is_trainable=True)
             model.print_trainable_parameters()
-            print(f"[split-2ts] Loaded base + existing SFT adapter in {time.time() - t_load:.1f}s", flush=True)
+            print(f"[split-2ts] Loaded base + existing adapter {init_dir} in {time.time() - t_load:.1f}s", flush=True)
 
-        if a.mode in {"grpo", "sft_and_grpo"}:
+        if a.mode == "grpo_offline_batch":
+            run_grpo_offline_batch(
+                model,
+                tokenizer,
+                sft_adapter_dir=sft_dir,
+                rollouts_jsonl=Path(a.rollouts_jsonl),
+                out_dir=out_dir,
+                save_lora_name=a.save_lora_name,
+                opt_state_path=Path(a.opt_state_path) if a.opt_state_path else None,
+                max_seq_len=a.max_seq_len,
+                lr=a.grpo_lr,
+                beta=a.grpo_beta,
+            )
+        elif a.mode in {"grpo", "sft_and_grpo"}:
             probes = (
                 load_probes_from_dir(Path(a.probe_dir), out_dir / "_probe_mods")
                 if a.probe_dir
@@ -703,7 +883,7 @@ def main() -> None:
                 data_root=Path(a.data_root),
                 out_dir=out_dir,
                 vllm_url=a.vllm_url,
-                sync_url=a.sync_url,
+                sync_url=sync_url or "",
                 initial_vllm_model=a.sft_lora_name,
                 lora_prefix=a.grpo_prefix,
                 reward_mode=a.reward_mode,

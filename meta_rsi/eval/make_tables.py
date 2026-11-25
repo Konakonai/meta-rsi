@@ -175,7 +175,7 @@ def generate_all(runs_dir: Path, out_dir: Path) -> None:
     if rep.get("geoanalyst"):
         md.extend([
             "",
-            "## Table 4: External `GeoAnalystBench` Deterministic Audit (`n=17`)",
+            "## Table 4: External `GeoAnalystBench` Deterministic Audit (`n=17`, `max_tokens=4096`)",
             "",
             "| Weights | Syntax OK | Uses 3857 | Proj Metric Vec | Dynamic CRS Vec | Raster NoData Safe | CRS Aligned | Strict Geo Sound |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -186,6 +186,39 @@ def generate_all(runs_dir: Path, out_dir: Path) -> None:
                 f"{100*g['projected_metric_vec']:.1f}% | {100*g['dynamic_crs_vec']:.1f}% | "
                 f"{100*g['raster_nodata_safe']:.1f}% | {100*g['crs_aligned']:.1f}% | **{100*g['strict_geo_sound']:.1f}%** |"
             )
+
+    if rep.get("wave2_v2"):
+        md.extend([
+            "",
+            "## Table 5: GSB v2 Two-Timescale Weight Internalization & Gen-2 Compounding RSI (`eval450` + Real OSM `n=24`)",
+            "",
+            "| Stage | Calls | ALL (`n=450`) | Seen (`n=300`) | Held-Out (`n=150`) | Lucky | Err | CompV | Rast | Large | Real OSM (`n=24`) |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        if "seed_26b" in sg:
+            r = sg["seed_26b"]
+            g = r["groups"]
+            md.append(
+                f"| Base 26B (bare `seed.py`) | {r['calls']:.2f} | {100*r['all']:.1f}% | {100*r['seen']:.1f}% | "
+                f"{100*r['ho']:.1f}% | {100*r['lucky']:.1f}% | {100*r['error']:.1f}% | {100*g.get('CompV',0):.1f}% | "
+                f"{100*g.get('Rast',0):.1f}% | {100*g.get('Large',0):.1f}% | 41.7% |"
+            )
+        w2o = rep.get("wave2_osm") or {}
+        for key, label in [
+            ("sft_weak_bare", "`SFT-Weak` LoRA (bare `seed.py`)"),
+            ("sft_meta_bare", "`SFT-Meta` LoRA (bare `seed.py`)"),
+            ("grpo_meta_bare", "**`GRPO-Meta` LoRA (bare `seed.py`)**"),
+            ("gen2_grpo_meta", "**Gen-2 Compounding (`GRPO-Meta` + 0-GIS-rule retry)**"),
+        ]:
+            if key in rep["wave2_v2"]:
+                r = rep["wave2_v2"][key]
+                g = r["groups"]
+                osm_v = f"**{100*w2o[key]['all']:.1f}%**" if key in w2o else "—"
+                md.append(
+                    f"| {label} | {r['calls']:.2f} | **{100*r['all']:.1f}%** | {100*r['seen']:.1f}% | "
+                    f"**{100*r['ho']:.1f}%** | {100*r['lucky']:.1f}% | {100*r['error']:.1f}% | "
+                    f"{100*g.get('CompV',0):.1f}% | {100*g.get('Rast',0):.1f}% | {100*g.get('Large',0):.1f}% | {osm_v} |"
+                )
 
     (out_dir / "summary_tables.md").write_text("\n".join(md) + "\n")
     (out_dir / "summary_data.json").write_text(json.dumps(rep, indent=2))
@@ -215,6 +248,26 @@ def generate_all(runs_dir: Path, out_dir: Path) -> None:
         bars,
         out_dir / "fig_gsb2_multiseed.svg",
     )
+
+    if rep.get("wave2_v2"):
+        w2 = rep["wave2_v2"]
+        w2_bars: list[tuple[str, float, float | None, str]] = []
+        if "seed_26b" in sg:
+            w2_bars.append(("Base 26B\n(Bare 1.00)", 100 * sg["seed_26b"]["all"], None, "#9ca3af"))
+        if "sft_weak_bare" in w2:
+            w2_bars.append(("SFT-Weak\n(Bare 1.00)", 100 * w2["sft_weak_bare"]["all"], None, "#ef4444"))
+        if "sft_meta_bare" in w2:
+            w2_bars.append(("SFT-Meta\n(Bare 1.00)", 100 * w2["sft_meta_bare"]["all"], None, "#0ea5e9"))
+        if "grpo_meta_bare" in w2:
+            w2_bars.append(("GRPO-Meta\n(Bare 1.00)", 100 * w2["grpo_meta_bare"]["all"], None, "#10b981"))
+        if "gen2_grpo_meta" in w2:
+            w2_bars.append(("Gen-2 RSI\n(0 GIS, 1.09)", 100 * w2["gen2_grpo_meta"]["all"], None, "#047857"))
+        _svg_bar_chart(
+            "GSB v2 Two-Timescale Weight Internalization (26B-A4B, n=450)",
+            "Disjoint train[20:60] -> SFT + 24-step GRPO-Metamorphic (3 certified probes) -> bare seed.py & Gen-2 retry.",
+            w2_bars,
+            out_dir / "fig_gsb2_two_timescale.svg",
+        )
     print(f"Wrote tables & SVG figures to {out_dir}")
 
 
