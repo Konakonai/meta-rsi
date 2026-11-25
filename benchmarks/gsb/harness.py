@@ -16,6 +16,11 @@ import tempfile
 from pathlib import Path
 
 REL_TOL = 0.01
+# Answers of type "coordinate" are WGS84 latitudes/longitudes in decimal degrees. A 1% relative band
+# would be ~0.6 deg (~67 km) at 60N and accept any latitude inside a city, so they get an absolute band:
+# centroid-based answers printed to >= 4 decimals pass, bounding-box maxima (>= 1.1e-4 deg off on
+# data/osm_global) and city-centre guesses (>= 2.9e-3 deg off) fail.
+COORD_ABS_TOL_DEG = 5e-5
 
 
 def extract_code(completion: str) -> str | None:
@@ -33,6 +38,8 @@ def extract_code(completion: str) -> str | None:
 def matches(value: float, truth: float, answer: str) -> bool:
     if answer == "count":
         return abs(value - truth) < 0.5
+    if answer == "coordinate":
+        return abs(value - truth) <= COORD_ABS_TOL_DEG + 1e-9  # slack for float error at the rounding edge
     return abs(value - truth) <= REL_TOL * max(abs(truth), 1e-12)
 
 

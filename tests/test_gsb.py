@@ -7,7 +7,7 @@ import pytest
 from benchmarks.gsb.audit import audit_task
 from benchmarks.gsb.build import make_task
 from benchmarks.gsb.families import FAMILIES
-from benchmarks.gsb.harness import score
+from benchmarks.gsb.harness import matches, score
 
 METRIC_REAL = {"buffer_union_area", "mean_nn_distance", "nearest_facility_max", "area_by_class",
                "perimeter_by_class", "overlay_area", "centroid_distance", "road_length_by_type",
@@ -81,3 +81,14 @@ def test_equal_area_passes_large_area(tasks):
         for info in t["variants"].values():
             val = fam.solve(read_layers(root / info["dir"], t["files"]), lambda g: g.to_crs("EPSG:6933"), t["params"])
             assert matches(val, info["truth"], "real"), (t["task_id"], val, info["truth"])
+
+
+def test_coordinate_answers_use_absolute_degree_tolerance():
+    # a 1% relative band is ~0.6 deg at 60N and would accept any latitude inside the city
+    truth = 60.17258
+    assert matches(truth, truth, "coordinate")
+    assert matches(60.1726, truth, "coordinate")  # centroid answer printed to 4 decimals
+    assert matches(60.17255, 60.1726, "coordinate")  # worst-case 4-decimal rounding sits on the edge
+    assert not matches(truth + 1.2e-4, truth, "coordinate")  # bounding-box maximum instead of the centroid
+    assert not matches(60.17, truth, "coordinate")  # city-centre guess
+    assert matches(60.17, truth, "real")  # what the old relative band accepted

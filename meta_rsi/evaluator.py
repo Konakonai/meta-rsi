@@ -211,13 +211,18 @@ def evaluate_harness(
     track_caught: bool = False,
     compute_oracle: bool = True,
     skip_dev_exec: bool = False,
+    keep_oracle_variants: bool = False,
     max_llm_calls: int = 4,
     max_exec_calls: int = 12,
     exec_timeout: float = 25.0,
     workers: int = 4,
     python: str = sys.executable,
 ) -> dict:
-    """Evaluate one candidate harness on a list of tasks."""
+    """Evaluate one candidate harness on a list of tasks.
+
+    With `keep_oracle_variants=True` each record also carries `oracle_variants`, the per-variant
+    oracle runs (status / value / correct / stderr tail) behind `oracle_category`.
+    """
     harness_mod = load_harness_module(harness_path)
     need_oracle = compute_oracle or use_oracle_in_loop
 
@@ -318,6 +323,8 @@ def evaluate_harness(
             sc = gsb_score(task, code, data_root, timeout=exec_timeout, python=python)
             rec["oracle_category"] = sc["category"]
             rec["oracle_correct"] = sc["category"] == "correct"
+            if keep_oracle_variants:
+                rec["oracle_variants"] = sc["variants"]
 
         if use_oracle_in_loop:
             rec["in_loop_pass"] = bool(rec["oracle_correct"])

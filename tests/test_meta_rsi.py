@@ -769,7 +769,40 @@ def test_dgm_select_parent_with_extra_seed_ancestors(tmp_path):
     assert partner is not None and partner.gen != p.gen
 
 
+def test_eval_test_saves_per_task_records():
+    """Both protocols save compact per-task records whose variant values explain the saved category."""
+    from meta_rsi.eval.eval_test import _evaluate_protocol_b, task_records
+    from meta_rsi.evaluator import evaluate_harness
 
+    by_id = {t["task_id"]: t for t in map(json.loads, open(DATA_ROOT / "tasks.jsonl"))}
+    t_ok, t_wrong, t_err = (by_id[i] for i in (
+        "buffer_union_area-test-0000", "count_within-test-0000", "mean_nn_distance-test-0000"))
+    scripts = {
+        t_ok["prompt"]: f"print({t_ok['variants']['low']['truth']!r})",
+        t_wrong["prompt"]: "print(-12345.0)",
+        t_err["prompt"]: "raise ValueError('boom')",
+    }
+    llm = LLMClient("mock", "mock-task", mock_fn=lambda system, user: f"```python\n{scripts[user]}\n```")
+    tasks = [t_ok, t_wrong, t_err]
+    seed = Path(__file__).resolve().parents[1] / "meta_rsi" / "harnesses" / "seed.py"
 
-
-
+    res_a = evaluate_harness(seed, tasks, DATA_ROOT, llm, compute_oracle=True, skip_dev_exec=True,
+                             keep_oracle_variants=True, max_llm_calls=1, workers=1)
+    recs_b, _ = _evaluate_protocol_b(seed, tasks, DATA_ROOT, llm, max_llm_calls=1, workers=1)
+    for protocol, raw in (("A", res_a["records"]), ("B", recs_b)):
+        recs = {r["task_id"]: r for r in task_records(raw, tasks, protocol)}
+        json.dumps(list(recs.values()), allow_nan=False)
+        for t in tasks:
+            r = recs[t["task_id"]]
+            assert set(r["variants"]) == set(t["variants"]) and r["answer"] == t["answer"]
+            for vn, v in r["variants"].items():
+                assert v["truth"] == t["variants"][vn]["truth"]
+                if v["status"] == "ok":  # saved values re-score offline to the saved verdicts
+                    assert v["correct"] == matches(v["value"], v["truth"], r["answer"])
+        assert recs[t_ok["task_id"]]["category"] == "correct", protocol
+        wrong = recs[t_wrong["task_id"]]
+        assert wrong["category"] == "silent_wrong", protocol
+        assert all(v["value"] == -12345.0 and not v["correct"] for v in wrong["variants"].values())
+        err = recs[t_err["task_id"]]
+        assert err["category"] == "error", protocol
+        assert all(v["status"] == "exception" and "boom" in v["detail"] for v in err["variants"].values())
