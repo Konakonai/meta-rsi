@@ -42,8 +42,16 @@ LAT_DIST_BINS = ((0.0, 5.0), (5.0, 15.0), (15.0, 90.0))  # |lat - nearest reloca
 PROBE_ABS_LATS = (58.3, 56.2, 86.0)
 DOMAINS = ("equatorial", "utm_valid", "polar")  # |lat| <= 8; inside UTM's 84N / 80S limits; beyond them
 # E2 (docs/NEXT_EXPERIMENTS.md): held-out failure mechanisms; one confirmatory comparison on far transfer
-MECHS = ("us_ft", "albers", "nodata_nan", "csv_lon360")
+# (amended 2026-11-25, docs/NEXT_EXPERIMENTS.md "Amendment 1"): near = us_ft, albers, nodata_nan; adjacent = csv_lon360;
+# far = raster_southup
+MECHS = ("us_ft", "albers", "nodata_nan", "csv_lon360", "raster_southup")
+TRANSFERS = ("near", "adjacent", "far")
 E2_CONFIRMATORY = ("arch_coev", "naive", "transfer:far")
+# blind area weight: within a band the centres are area-uniform, so the weight of a band is its share of the
+# sphere's area (sin hi - sin lo), split over the task's scored variants in that band; `large` tasks are
+# area-uniform over one interval and need no reweighting
+BAND_AREA = {f"{lo:g}-{hi:g}": math.sin(math.radians(hi)) - math.sin(math.radians(lo))
+             for lo, hi in ((0, 30), (30, 60), (60, 80), (80, 89))}
 
 
 def abs_lat_dist(lat: float) -> float:
@@ -108,14 +116,24 @@ def cmd_score(a: argparse.Namespace) -> None:
     for f in files:
         dst = blind_path(f, suffix=suffix)
         rows = [json.loads(ln) for ln in open(f)]
-        if dst.exists() and len(json.loads(dst.read_text()).get("records", [])) == len(rows):
+        # incremental: keep results already on disk, run only (task, variant) pairs that are missing, e.g. after
+        # a mechanism was added to the variant set
+        done: dict[str, dict] = {}
+        if dst.exists():
+            done = {rec["task_id"]: rec["variants"] for rec in json.loads(dst.read_text()).get("records", [])}
+        jobs = [(r, vn) for r in rows if r["task_id"] in blind and r.get("code")
+                for vn, v in blind[r["task_id"]]["variants"].items() if v["scored"] and vn not in done.get(r["task_id"], {})]
+        missing_nocode = any(r["task_id"] in blind and not r.get("code")
+                             and {vn for vn, v in blind[r["task_id"]]["variants"].items() if v["scored"]} - set(done.get(r["task_id"], {}))
+                             for r in rows)
+        if dst.exists() and not jobs and not missing_nocode:
             continue
         t0 = time.time()
-        jobs = [(r, vn) for r in rows if r["task_id"] in blind and r.get("code")
-                for vn, v in blind[r["task_id"]]["variants"].items() if v["scored"]]
         with ThreadPoolExecutor(max_workers=a.workers) as ex:
             res = list(ex.map(lambda j: run(j[0]["code"], blind[j[0]["task_id"]], j[1]), jobs))
         by_task: dict[str, dict] = defaultdict(dict)
+        for tid, vs in done.items():
+            by_task[tid].update(vs)
         for (r, vn), x in zip(jobs, res):
             by_task[r["task_id"]][vn] = x
         recs = []
@@ -124,7 +142,8 @@ def cmd_score(a: argparse.Namespace) -> None:
             if t is None:
                 continue
             scored = [vn for vn, v in t["variants"].items() if v["scored"]]
-            vs = by_task.get(r["task_id"]) or {vn: {"status": "no_code", "value": None, "correct": False} for vn in scored}
+            vs = ({vn: by_task[r["task_id"]][vn] for vn in scored if vn in by_task[r["task_id"]]} if r.get("code")
+                  else {vn: {"status": "no_code", "value": None, "correct": False} for vn in scored})
             recs.append({"task_id": r["task_id"], "family": t["family"], "variants": vs})
         n_ok = sum(x["correct"] for rec in recs for x in rec["variants"].values())
         n_all = sum(len(rec["variants"]) for rec in recs)
@@ -188,13 +207,20 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
         for rec in json.loads(f.read_text())["records"]:
             t = blind[rec["task_id"]]
             for vn, x in rec["variants"].items():
+                i = tidx[rec["task_id"]]
                 for s in strata(t, vn, rec["task_id"] in low_ok):
-                    num[s][tidx[rec["task_id"]]] += x["correct"]
-                    den[s][tidx[rec["task_id"]]] += 1
-                if not heldout:
-                    w = math.cos(math.radians(t["variants"][vn]["lat"]))  # area weight: undoes the band quotas
-                    num["all_cosw"][tidx[rec["task_id"]]] += w * x["correct"]
-                    den["all_cosw"][tidx[rec["task_id"]]] += w
+                    num[s][i] += x["correct"]
+                    den[s][i] += 1
+                if heldout and ev_recs:  # change from `low` for the same script: variant correct - low correct
+                    for s in (f"drop:transfer:{t['variants'][vn]['transfer']}", f"drop:mech:{t['variants'][vn]['mechanism']}"):
+                        num[s][i] += float(x["correct"]) - float(rec["task_id"] in low_ok)
+                        den[s][i] += 1
+                if not heldout:  # area weight: undoes the equal quota per band (Addendum 3)
+                    band = t["variants"][vn]["band"]
+                    n_b = sum(1 for wn in rec["variants"] if t["variants"][wn]["band"] == band)
+                    w = (BAND_AREA[band] if band in BAND_AREA else 1.0) / n_b
+                    num["all_areaw"][i] += w * x["correct"]
+                    den["all_areaw"][i] += w
         # the same scripts on the designed non-low variants (high / polar / antimeridian / mid / zone_edge)
         if ev_recs:
             for rec in ev_recs:
@@ -204,7 +230,7 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
                     if vn != "low":
                         num["designed"][tidx[rec["task_id"]]] += x["correct"]
                         den["designed"][tidx[rec["task_id"]]] += 1
-        per[(e["method"], e["seed"])].append({s: np.where(den[s] > 0, num[s] / np.maximum(den[s], 1), np.nan) for s in num})
+        per[(e["method"], e["seed"])].append({s: np.where(den[s] > 0, num[s] / np.where(den[s] > 0, den[s], 1.0), np.nan) for s in num})
 
     methods = list(dict.fromkeys(e["method"] for e in manifest["entries"]))
     all_strata = sorted({s for reps in per.values() for r in reps for s in r})
@@ -283,17 +309,21 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
 
 
 def render_heldout(rep: dict) -> str:
-    cols = (["designed", "all", "transfer:near", "transfer:far"] + [f"mech:{m}" for m in MECHS]
-            + ["matched:near", "matched:far", "lowok:transfer:near", "lowok:transfer:far"])
+    cols = (["designed", "all"] + [f"transfer:{t}" for t in TRANSFERS] + [f"mech:{m}" for m in MECHS]
+            + ["matched:near", "matched:far", "lowok:transfer:near", "lowok:transfer:far", "drop:transfer:near",
+               "drop:transfer:far"])
     labels = [c.split(":")[-1] if c.split(":")[0] in ("transfer", "mech") or ":" not in c
               else f"{c.split(':')[0][:5]}:{c.split(':')[-1]}" for c in cols]
-    lines = ["Held-out mechanism accuracy (E2; share of scored variants correct; mean over seeds). `near`: us_ft, albers;",
-             "`far`: nodata_nan, csv_lon360. `match`: only tasks with both near and far variants. `lowok`: only tasks the",
-             "same script got right on `low` (robustness; task sets differ by method, so descriptive only).",
+    lines = ["Held-out mechanism accuracy (E2; share of scored variants correct; mean over seeds). `near`: us_ft, albers,",
+             "nodata_nan; `adjacent`: csv_lon360; `far`: raster_southup. `match`: only tasks with both near and far variants.",
+             "`lowok`: only tasks the same script got right on `low` (task sets differ by method, so descriptive only).",
+             "`drop`: variant correct minus `low` correct for the same script, per task (pp; negative = broken by the mechanism).",
              "Drop reused rep 1: " + str(rep.get("drop_reused_rep1")),
              f"{'method':16s} " + " ".join(f"{lab:>11s}" for lab in labels)]
     for m, d in rep["methods"].items():
-        lines.append(f"{m:16s} " + " ".join(f"{100 * d[c]['mean']:10.1f}%" if c in d else f"{'-':>11s}" for c in cols))
+        lines.append(f"{m:16s} " + " ".join(
+            (f"{100 * d[c]['mean']:+10.1f} " if c.startswith("drop:") else f"{100 * d[c]['mean']:10.1f}%") if c in d
+            else f"{'-':>11s}" for c in cols))
     if "confirmatory" in rep:
         c = rep["confirmatory"]
         lo, hi = c["t_ci95"]
@@ -305,12 +335,13 @@ def render_heldout(rep: dict) -> str:
         lines.append(f"\nvs {ref} (descriptive): seed-paired difference (pp) [t5 95%], sign-flip p")
         for r in rows:
             parts = []
-            for key in ("all", "transfer:near", "transfer:far", "matched:near", "matched:far"):
+            for key in ("all", "transfer:near", "transfer:adjacent", "transfer:far", "matched:near", "matched:far",
+                        "drop:transfer:far"):
                 if key in r["by_stratum"] or key == "all":
                     d = r["diff"] if key == "all" else r["by_stratum"][key]
                     lo, hi = r["t_ci95"] if key == "all" else r["by_stratum_t95"][key]
                     pv = r["sign_flip_p"] if key == "all" else r["by_stratum_p"][key]
-                    parts.append(f"{key.split(':')[0][:5] + ':' if key.startswith('matched') else ''}{key.split(':')[-1]} "
+                    parts.append(f"{key.split(':')[0][:5] + ':' if key.startswith(('matched', 'drop')) else ''}{key.split(':')[-1]} "
                                  f"{100 * d:+.1f} [{100 * lo:+.1f}, {100 * hi:+.1f}] p={pv:.3f}")
             lines.append(f"  {r['method']:16s} " + "  | ".join(parts) + f"  n_seeds={len(r['seeds'])}")
     return "\n".join(lines)
@@ -320,11 +351,11 @@ def render(rep: dict) -> str:
     if rep.get("kind") == "heldout":
         return render_heldout(rep)
     bins = [f"{lo:g}-{hi:g}" for lo, hi in LAT_DIST_BINS]
-    cols = (["designed", "all", "all_cosw"] + [f"band:{b}" for b in BANDS] + [f"probe_lat_dist:{b}" for b in bins]
+    cols = (["designed", "all", "all_areaw"] + [f"band:{b}" for b in BANDS] + [f"probe_lat_dist:{b}" for b in bins]
             + [f"abs_lat_dist:{b}" for b in bins] + [f"domain:{d}" for d in DOMAINS])
     lines = ["Blind-variant accuracy (share of scored blind variants correct; mean over seeds). `designed`: the same",
-             "scripts on the designed non-low variants; `all`: every scored blind variant; `all_cosw`: weighted by",
-             "cos(latitude); then by band, by signed (`sig`) and |lat| (`abs`) distance to the nearest relocating-probe",
+             "scripts on the designed non-low variants; `all`: every scored blind variant; `all_areaw`: each band weighted",
+             "by its share of the sphere's area; then by band, by signed (`sig`) and |lat| (`abs`) distance to the nearest relocating-probe",
              "latitude, and by mechanism domain (local families). Drop reused rep 1: " + str(rep.get("drop_reused_rep1")),
              f"{'method':16s} " + " ".join(f"{(c.split(':')[0][:3] + ':' if 'dist' in c else '') + c.split(':')[-1]:>11s}" for c in cols)]
     for m, d in rep["methods"].items():

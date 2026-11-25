@@ -76,7 +76,12 @@ def test_summary_pairs_seeds_and_splits_by_stratum(tmp_path):
     assert row["by_stratum"]["domain:equatorial"] == 0.0 and row["by_stratum"]["domain:polar"] == 1.0
     # |lat| distance 0-5: b3 (57), b4 (-61), b6 (-85), b7 (86.5); ref solves b3 only (t0 has no b7)
     assert row["by_stratum"]["abs_lat_dist:0-5"] == pytest.approx(1 - (1 / 3 + 3 * 0.25) / 4)
-    assert "all_cosw" in rep["methods"]["ref"] and "t_ci_bonf" in row
+    assert "all_areaw" in rep["methods"]["ref"] and "t_ci_bonf" in row
+    # area weights: a band's share of the sphere split over the task's scored variants in it; ref solves 0-30, 30-60
+    a = score_blind.BAND_AREA
+    full = (a["0-30"] + a["30-60"]) / sum(a.values())
+    assert rep["methods"]["ref"]["all_areaw"]["mean"] == pytest.approx(full)  # t0's unscored 80-89 variant: same share
+    assert rep["methods"]["m"]["all_areaw"]["mean"] == pytest.approx(1.0)
     assert "domain:polar" in row["by_stratum_t95"]
 
 
@@ -87,7 +92,7 @@ def test_heldout_summary_strata_and_confirmatory(tmp_path):
     root.mkdir()
     layout = {"t0": ["us_ft", "albers", "nodata_nan"], "t1": ["us_ft", "albers", "nodata_nan"],
               "t2": ["us_ft"], "t3": ["csv_lon360"]}
-    transfer = {"us_ft": "near", "albers": "near", "nodata_nan": "far", "csv_lon360": "far"}
+    transfer = {"us_ft": "near", "albers": "near", "nodata_nan": "far", "csv_lon360": "far"}  # labels as in the data
     tasks = [{"task_id": tid, "family": f"f{i // 2}", "answer": "real", "large": False,
               "variants": {m: {"dir": f"{tid}/{m}", "lat": 10.0, "lon": -20.0, "mechanism": m, "transfer": transfer[m],
                                "truth": 1.0, "scored": True} for m in ms}}
@@ -121,10 +126,13 @@ def test_heldout_summary_strata_and_confirmatory(tmp_path):
     assert nv["transfer:far"]["mean"] == pytest.approx(0.0)
     assert nv["mech:csv_lon360"]["mean"] == pytest.approx(0.0)
     assert nv["matched:near"]["mean"] == pytest.approx(1.0) and nv["matched:far"]["mean"] == pytest.approx(0.0)
-    assert "band:0-30" not in nv and "all_cosw" not in nv
+    assert "band:0-30" not in nv and "all_areaw" not in nv
     # lowok: naive got only t0 right on `low`
     assert nv["lowok:transfer:far"]["mean"] == pytest.approx(0.0)
     assert rep["methods"]["arch_coev"]["lowok:transfer:far"]["mean"] == pytest.approx(1.0)
+    # drop = variant correct - low correct: naive is right on low only for t0 -> far drops: t0 -1, t1 0, t3 0
+    assert nv["drop:transfer:far"]["mean"] == pytest.approx(-1 / 3)
+    assert nv["drop:transfer:near"]["mean"] == pytest.approx((0 + 1 + 1) / 3)
 
     row = rep["vs_ref"]["naive"][0]
     assert row["by_stratum"]["transfer:far"] == pytest.approx(1.0)
@@ -134,3 +142,30 @@ def test_heldout_summary_strata_and_confirmatory(tmp_path):
     assert c["diff"] == pytest.approx(1.0) and c["sign_flip_p"] == pytest.approx(2 / 64) and c["established"]
     text = score_blind.render(rep)
     assert "CONFIRMATORY (E2)" in text and "ESTABLISHED" in text and "csv_lon360" in text
+
+
+def test_score_is_incremental_when_a_mechanism_is_added(tmp_path, monkeypatch):
+    """Adding a mechanism to the variant set scores only the new (task, variant) pairs and keeps the old results."""
+    import argparse
+    root, out = tmp_path / "v2_heldout_mech", tmp_path / "out"
+    (out / "evals").mkdir(parents=True)
+    root.mkdir()
+    v = lambda m, tr: {"dir": f"t0/{m}", "lat": 1.0, "lon": 2.0, "mechanism": m, "transfer": tr, "truth": 1.0, "scored": True}
+    task = {"task_id": "t0", "family": "f", "answer": "real", "large": False,
+            "variants": {"us_ft": v("us_ft", "near"), "raster_southup": v("raster_southup", "far")}}
+    (root / "tasks.jsonl").write_text(json.dumps(task) + "\n")
+    (out / "manifest.json").write_text(json.dumps({"entries": [{"tag": "naive_s0", "method": "naive", "seed": 0}]}))
+    (out / "evals" / "naive_s0_A_rep1.code.jsonl").write_text(
+        json.dumps({"task_id": "t0", "code": "print(1)"}) + "\n" + json.dumps({"task_id": "t9", "code": None}) + "\n")
+    old = {"status": "ok", "value": 2.0, "correct": False}
+    (out / "evals" / "naive_s0_A_rep1.heldout.json").write_text(json.dumps(
+        {"records": [{"task_id": "t0", "family": "f", "variants": {"us_ft": old}}]}))
+    calls = []
+    monkeypatch.setattr(score_blind, "run_variant", lambda code, d, timeout: calls.append(d.name) or {"status": "ok", "value": 1.0})
+    score_blind.cmd_score(argparse.Namespace(out=str(out), blind=str(root), workers=2, timeout=5.0, suffix="", prioritize=""))
+    assert calls == ["raster_southup"]
+    rec = json.loads((out / "evals" / "naive_s0_A_rep1.heldout.json").read_text())["records"][0]["variants"]
+    assert rec["us_ft"] == old and rec["raster_southup"]["correct"] is True
+    calls.clear()
+    score_blind.cmd_score(argparse.Namespace(out=str(out), blind=str(root), workers=2, timeout=5.0, suffix="", prioritize=""))
+    assert calls == []

@@ -122,3 +122,12 @@ Disclosure of what was seen first:
   - antimeridian-crossing scenes, listed but not analysed (n = 2).
 - Added: blind accuracy weighted by cos(latitude), to undo the 25% share given to the 80–89° band, which covers 1.5% of the sphere.
 - **Reading 1 is narrowed.** Blind relocation tests whether a method generalizes across positions within the failure mechanisms the probes exercise (Web Mercator distortion away from the equator, UTM domain limits). It cannot test generalization to mechanisms the probes do not exercise. Reading 1 therefore becomes "the gain is not tied to the probes' coordinates". A positive result is not evidence against M1's broader point that the probes and the designed variants share failure mechanisms; that needs held-out mechanisms, which `data/v2_blind` does not contain.
+
+## Addendum 3: area weight corrected (2026-11-25, 23:40 CST, before any blind summary)
+
+The reviewer's second round (`runs/agent_mail/carbon_reply_1.md`) found that the cos(latitude) weight of Addendum 2 double-counts. `build_blind.py` already draws each centre area-uniformly within its band, so the only bias is the equal quota of 2 centres per band. Weighting by cos(latitude) on top gives each band a weight ∝ cos²φ / Δsin, which still over-weights 80–89° by about 2.2×.
+
+- **Corrected weight.** For a local task, each scored variant in band b gets (sin hi_b − sin lo_b) / n_{t,b}. That is the band's share of the sphere's area (0–30°: 0.500, 30–60°: 0.366, 60–80°: 0.119, 80–89°: 0.015), split over the task's scored variants in that band. `large` tasks are sampled area-uniformly over one interval and keep equal weights.
+- **Name.** The stratum is renamed `all_areaw`. `all_cosw` is no longer reported.
+- **A related fix.** The per-task share divided by max(weight sum, 1). That is harmless for counts but wrong for fractional weights. It now divides by the weight sum itself.
+- No blind summary had been computed when this was fixed, so no reported number changes.

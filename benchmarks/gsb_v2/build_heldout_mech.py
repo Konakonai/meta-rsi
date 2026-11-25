@@ -4,13 +4,18 @@ Evaluates whether gains on GSB v2 generalize beyond the specific mechanisms exer
 metamorphic probes (Web Mercator, UTM limits, Mercator/TM storage, km units). Every variant keeps
 the task at its original `low` location so ONLY the storage/encoding mechanism changes:
 
-  Near transfer (mechanism family touched by probes, in an unseen form):
-    - `us_ft`     : every `.gpkg` vector layer stored in a local Transverse Mercator CRS with `+units=us-ft`
-    - `albers`    : every `.gpkg` vector layer stored in a local Albers Equal-Area Conic CRS (`+units=m`)
-  Far transfer (mechanism untouched by any probe):
-    - `nodata_nan`: every `.tif` GeoTIFF stored as float32 with IEEE-754 `NaN` nodata instead of integer sentinel
-    - `csv_lon360`: every `.csv` point layer with longitudes converted to `[0, 360)` (west-of-Greenwich only,
-                    so at least one longitude value actually changes)
+  Near transfer (a mechanism family the gate's probes exercise, in a form they do not use):
+    - `us_ft`         : every `.gpkg` vector layer stored in a local Transverse Mercator CRS with `+units=us-ft`
+    - `albers`        : every `.gpkg` vector layer stored in a local Albers Equal-Area Conic CRS (`+units=m`)
+    - `nodata_nan`    : every `.tif` GeoTIFF stored as float32 with IEEE-754 `NaN` nodata instead of the sentinel
+                        (the built-in `crs_storage_flip` probe already swaps the sentinel, -9999 <-> -32768)
+  Adjacent (no probe writes it, but the fix the polar probe induces handles it for free):
+    - `csv_lon360`    : every `.csv` point layer with longitudes converted to `[0, 360)` (west-of-Greenwich only,
+                        so at least one longitude value actually changes). `estimate_utm_crs` raises on it as at
+                        86N, and PROJ `aeqd` wraps the longitude, so a script that fell back to AEQD passes.
+  Far transfer (no probe writes it; every probe keeps the source raster's row order):
+    - `raster_southup`: every `.tif` GeoTIFF stored south-up (rows flipped, transform with positive `e`), same
+                        pixels and footprint, no resampling
 
 Reference truths are recomputed from the written files with each family's reference solver; any
 variant whose reference truth moves from `low` by more than build.py's invariance tolerance
@@ -33,6 +38,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from pyproj import CRS
+from rasterio.transform import Affine
 
 from . import build as B
 from .families import BY_NAME
@@ -41,9 +47,11 @@ from .geo import reference_aeqd_crs
 MECHANISMS = (
     ("us_ft", "near"),
     ("albers", "near"),
-    ("nodata_nan", "far"),
-    ("csv_lon360", "far"),
+    ("nodata_nan", "near"),
+    ("csv_lon360", "adjacent"),
+    ("raster_southup", "far"),
 )
+TRANSFER = dict(MECHANISMS)
 
 
 def _us_ft_crs(lat: float, lon: float) -> CRS:
@@ -90,7 +98,7 @@ def _write_one_mechanism(
 
     if mech in ("us_ft", "albers") and not has_gpkg:
         return None
-    if mech == "nodata_nan" and not has_tif:
+    if mech in ("nodata_nan", "raster_southup") and not has_tif:
         return None
     if mech == "csv_lon360":
         if not has_csv:
@@ -140,6 +148,25 @@ def _write_one_mechanism(
                 shutil.copy2(src_p, dst_p)
                 storage[stem] = "unchanged"
 
+    elif mech == "raster_southup":
+        for stem, fn in files.items():
+            src_p, dst_p = low_dir / fn, out_dir / fn
+            if fn.endswith(".tif"):
+                with rasterio.open(src_p) as src:
+                    t = src.transform
+                    if t.b != 0.0 or t.d != 0.0 or t.e >= 0.0:
+                        raise ValueError(f"{task['task_id']}/{fn}: expected a north-up raster, got {t}")
+                    arr = src.read()
+                    prof = src.profile.copy()
+                    # row r of the new raster is row h-1-r of the old one; same pixel edges, same footprint
+                    prof.update(transform=Affine(t.a, 0.0, t.c, 0.0, -t.e, t.f + t.e * src.height))
+                    with rasterio.open(dst_p, "w", **prof) as dst:
+                        dst.write(arr[:, ::-1, :])
+                storage[stem] = "south-up (transform e > 0)"
+            else:
+                shutil.copy2(src_p, dst_p)
+                storage[stem] = "unchanged"
+
     elif mech == "csv_lon360":
         for stem, fn in files.items():
             src_p, dst_p = low_dir / fn, out_dir / fn
@@ -157,8 +184,8 @@ def _write_one_mechanism(
     return {"storage": storage}
 
 
-def _task_worker(args: tuple[dict, str, str]) -> dict:
-    task, v2_root_s, out_root_s = args
+def _task_worker(args: tuple[dict, str, str, tuple[str, ...]]) -> dict:
+    task, v2_root_s, out_root_s, mechs = args
     v2_root, out_root = Path(v2_root_s), Path(out_root_s)
     fam = BY_NAME[task["family"]]
     tid = task["task_id"]
@@ -168,6 +195,8 @@ def _task_worker(args: tuple[dict, str, str]) -> dict:
 
     variants: dict[str, dict] = {}
     for mech, transfer in MECHANISMS:
+        if mech not in mechs:
+            continue
         vdir = out_root / tid / mech
         info = _write_one_mechanism(task, low_dir, vdir, mech)
         if info is None:
@@ -213,20 +242,39 @@ def main() -> None:
     ap.add_argument("--v2", default="data/v2")
     ap.add_argument("--out", default="data/v2_heldout_mech")
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--mechanisms", default=",".join(m for m, _ in MECHANISMS),
+                    help="comma-separated subset to (re)build; other mechanisms' variants in an existing "
+                         "tasks.jsonl are kept, and every variant's `transfer` label is refreshed")
     a = ap.parse_args()
 
     v2_root = Path(a.v2)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    mechs = tuple(m.strip() for m in a.mechanisms.split(",") if m.strip())
+    unknown = set(mechs) - set(TRANSFER)
+    if unknown:
+        raise SystemExit(f"unknown mechanisms: {sorted(unknown)}")
 
     test_tasks = [t for t in map(json.loads, open(v2_root / "tasks.jsonl")) if t["split"] == "test"]
-    jobs = [(t, str(v2_root), str(out)) for t in test_tasks]
+    jobs = [(t, str(v2_root), str(out), mechs) for t in test_tasks]
     with ProcessPoolExecutor(max_workers=min(a.workers, len(jobs))) as ex:
         built = list(ex.map(_task_worker, jobs))
 
-    with open(out / "tasks.jsonl", "w") as fh:
+    old_path = out / "tasks.jsonl"
+    if set(mechs) != set(TRANSFER) and old_path.exists():  # partial rebuild: keep the other mechanisms
+        old = {t["task_id"]: t for t in map(json.loads, open(old_path))}
+        for t in built:
+            keep = {m: v for m, v in old.get(t["task_id"], {}).get("variants", {}).items() if m not in mechs}
+            t["variants"] = {m: v for m, v in {**keep, **t["variants"]}.items()}
+    for t in built:
+        t["variants"] = {m: t["variants"][m] for m, _ in MECHANISMS if m in t["variants"]}
+        for m, v in t["variants"].items():
+            v["transfer"] = TRANSFER[m]
+    tmp = out / "tasks.jsonl.tmp"
+    with open(tmp, "w") as fh:
         for t in built:
             fh.write(json.dumps(t) + "\n")
+    tmp.replace(old_path)  # atomic, so a scorer reading tasks.jsonl never sees a partial file
 
     vs = [v for t in built for v in t["variants"].values()]
     by_mech = Counter(v["mechanism"] for v in vs)
@@ -237,6 +285,7 @@ def main() -> None:
         "n_tasks_with_any_variant": sum(bool(t["variants"]) for t in built),
         "n_variants": len(vs),
         "scored": sum(v["scored"] for v in vs),
+        "transfer": TRANSFER,
         "by_mechanism": dict(by_mech),
         "scored_by_mechanism": dict(scored_by_mech),
         "not_scored_by_family_mechanism": dict(not_scored),
