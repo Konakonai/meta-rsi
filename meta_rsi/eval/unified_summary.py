@@ -123,6 +123,14 @@ def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
                 orig = {e["seed"]: e.get("orig_correct") for e in entries if e["method"] == m}
                 shift = [row["correct"]["per_seed"][i] - orig[s] for i, s in enumerate(seeds) if orig.get(s) is not None]
                 row["shift_vs_orig_eval"] = float(np.mean(shift)) if shift else None
+                row["shift_per_seed"] = {s: row["correct"]["per_seed"][i] - orig[s]
+                                         for i, s in enumerate(seeds) if orig.get(s) is not None}
+                # Pre-registered seed-0 check (docs/BLIND_PROTOCOL.md): seed 0 minus the mean of the other seeds
+                rest = [row["correct"]["per_seed"][i] for i, s in enumerate(seeds) if s != 0]
+                rest_o = [orig[s] for s in seeds if s != 0 and orig.get(s) is not None]
+                if 0 in seeds and rest:
+                    row["seed0_gap"] = row["correct"]["per_seed"][seeds.index(0)] - float(np.mean(rest))
+                    row["seed0_gap_orig"] = (orig[0] - float(np.mean(rest_o))) if orig.get(0) is not None and rest_o else None
                 row["orig_models"] = sorted({str(e.get("orig_model")) for e in entries if e["method"] == m})
             report["methods"].setdefault(m, {})[proto] = row
 
@@ -180,6 +188,17 @@ def summarize(out: Path, ref: str = "arch_coev", n_boot: int = 4000) -> dict:
         {"pairs": len(deltas), "mean_abs_delta": float(np.mean(deltas)), "max_abs_delta": float(np.max(deltas)),
          "mean_task_flip_rate": float(np.mean(flips))} if deltas else None
     )
+
+    # Pre-registered backend check: |rep1 - rep2| for harnesses whose rep 1 was reused from an earlier server,
+    # against harnesses whose repeats both ran on the unified server.
+    gaps: dict[str, list[float]] = {"reused": [], "fresh": []}
+    for e in entries:
+        reps = runs.get((e["tag"], "A"), [])
+        if len(reps) >= 2:
+            common = set(reps[0]) & set(reps[1])
+            c = [np.mean([_cat(r[t]["category"]) == "correct" for t in common]) for r in reps[:2]]
+            gaps["reused" if e.get("reused_A_rep1") else "fresh"].append(abs(c[0] - c[1]))
+    report["rep_gap_A"] = {k: {"n": len(v), "mean_abs": float(np.mean(v)) if v else None} for k, v in gaps.items()}
     report["missing_harnesses"] = manifest.get("missing", [])
     return report
 
@@ -216,6 +235,19 @@ def render(rep: dict) -> str:
         for m, t in rep["a_to_b"].items():
             lines.append(f"| {m} | " + " | ".join(f"{pct(t[c]['b_correct'])} (n={t[c]['n']})" for c in CATS) + " |")
         lines.append("")
+    gap_rows = [(m, by_p["A"]) for m, by_p in rep["methods"].items() if "seed0_gap" in by_p.get("A", {})]
+    if gap_rows:
+        lines += ["## Seed 0 minus the mean of seeds 1-5 (Protocol A correct, pp)", "",
+                  "| method | unified | original eval | per-seed shift vs original |", "|---|---|---|---|"]
+        for m, r in gap_rows:
+            o = r.get("seed0_gap_orig")
+            sh = " / ".join(f"s{k}:{100 * v:+.1f}" for k, v in r["shift_per_seed"].items())
+            lines.append(f"| {m} | {100 * r['seed0_gap']:+.1f} | {'n/a' if o is None else f'{100 * o:+.1f}'} | {sh} |")
+        lines.append("")
+    rg = rep.get("rep_gap_A") or {}
+    if any(v["n"] for v in rg.values()):
+        lines.append("Protocol A |rep 1 - rep 2|: " + ", ".join(
+            f"{k} {100 * v['mean_abs']:.1f} pp (n={v['n']})" for k, v in rg.items() if v["n"]))
     rv = rep["repeat_variability_A"]
     if rv:
         lines.append(f"Protocol A repeats: {rv['pairs']} pairs, mean |Δ correct| {100 * rv['mean_abs_delta']:.1f} pp "

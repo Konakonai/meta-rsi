@@ -41,3 +41,36 @@ What "blind" means here: the locations were drawn from a fixed distribution chos
 3. **Absolute blind accuracy is reported for every method and band, whichever reading holds.** A method that is wrong at 30–60° is wrong for most of the Earth's land, whatever the paired difference shows.
 
 Whichever reading the data support goes into `docs/RESEARCH.md` with the full table.
+
+## Addendum: unified 6-seed re-evaluation (pre-registered 2026-11-25, 22:05 CST)
+
+Written while `runs/v10_unified_6seed/` was at job 9 of 144. No unified result had been read when this was written. The only blind numbers seen were four per-method accuracies for `meta_gate_only`, which compare nothing.
+
+**What is run.** All 48 best harnesses (8 methods × 6 seeds) on one server: Colab G4 vLLM bf16, `google/gemma-4-26B-A4B-it`, temperature 0, no thinking, `--max-model-len 8192`.
+- Protocol A: 2 repeats on all 450 test tasks. For 15 harnesses (seeds 1–5 of `naive`, `meta_gate_only`, `oracle_soft`), repeat 1 reuses the rebuttal-session eval: same model and decoding, but that server also had `--enable-lora`.
+- Protocol B: 1 repeat on the first 5 test tasks of each family (100 tasks).
+- Tooling: `scripts/rebuttal/unified_6seed_eval.py launch --a-reps 2 --b-reps 1 --b-per-family 5`.
+
+**Primary outcome.** The Protocol A share of tasks correct on every variant, averaged over the 2 repeats, per seed.
+
+**Primary comparisons** (`python -m meta_rsi.eval.unified_summary`, run with `--ref naive` and with `--ref arch_coev`). For each method against each reference:
+- seed-paired mean difference;
+- 95% hierarchical bootstrap interval, resampling seeds (paired) and task families;
+- exact sign-flip p over seeds, Holm-adjusted across the 7 other methods.
+
+With 6 seeds the smallest sign-flip p is 0.031, so no Holm-adjusted p can fall below 0.05. The decision rule is therefore the bootstrap interval: a difference counts as established only if the interval excludes 0. The sign-flip p is reported next to it.
+
+**The seed-0 question.** The original evals put seed 0 far above seeds 1–5 for `naive`, `meta_gate_only` and `oracle_soft` (46.9 / 53.6 / 55.3% against 31.9 / 33.9 / 36.0%). For every method we report the per-seed shift from the original eval, and the gap between seed 0 and the mean of seeds 1–5, under both the original and the unified evals.
+- (a) If the unified seed-0 gap for those three methods is within repeat noise (≤ 4 pp), the original seed-0 numbers reflect eval drift, and the single-seed comparisons in RESEARCH.md §2.3.1 are withdrawn.
+- (b) If the gap stays above 10 pp, seed 0 is a genuinely favourable seed. The single-seed comparisons are then reported as one seed out of six.
+- Anything in between is reported as is.
+
+**Backend check.** `arch_coev` was first evaluated on Vertex MaaS. Its shift from that eval is reported per seed. For the 15 reused harnesses, |rep 1 − rep 2| is compared with the same quantity for the 33 harnesses whose both repeats ran on the unified server. If the reused gap is larger by more than 2 pp on average, the reused repeat 1 is dropped and those harnesses use repeat 2 only.
+
+**Secondary.**
+- Protocol B on its 100-task subset, with the same comparisons.
+- What Protocol B does to tasks that Protocol A scored correct, lucky or silent-wrong.
+- Protocol A repeat variability.
+- The blind-variant analysis specified above.
+
+**Reporting.** The unified table replaces the §2.3.1 multi-seed table as the main 6-seed result in `docs/RESEARCH.md`, and the original numbers stay alongside it. Whichever reading holds is reported.

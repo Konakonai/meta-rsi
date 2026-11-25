@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from meta_rsi.eval.unified_summary import holm, sign_flip_p, summarize
+from meta_rsi.eval.unified_summary import holm, render, sign_flip_p, summarize
 
 N_TASKS, SEEDS = 10, range(6)
 
@@ -31,7 +31,8 @@ def test_summarize_pairs_seeds_tasks_and_protocols(tmp_path):
     for method, a_cats, b_cats in (("m", m_a, m_b), ("ref", ref, ref)):
         for s in SEEDS:
             tag = f"{method}_s{s}"
-            entries.append({"tag": tag, "method": method, "seed": s, "orig_correct": 0.5})
+            entries.append({"tag": tag, "method": method, "seed": s, "orig_correct": 0.8 if s == 0 else 0.5,
+                            "reused_A_rep1": method == "m" and s == 0})
             (tmp_path / "evals" / f"{tag}_A_rep1.json").write_text(json.dumps(_eval(a_cats)))
             (tmp_path / "evals" / f"{tag}_B_rep1.json").write_text(json.dumps(_eval(b_cats)))
     flipped = ["silent_wrong"] + m_a[1:]  # second A repeat of m_s0 loses t0
@@ -44,7 +45,11 @@ def test_summarize_pairs_seeds_tasks_and_protocols(tmp_path):
     a = rep["methods"]["m"]["A"]
     assert a["correct"]["per_seed"][0] == pytest.approx(0.55)  # mean over the two repeats of seed 0
     assert a["correct"]["per_seed"][1] == pytest.approx(0.6)
-    assert a["shift_vs_orig_eval"] == pytest.approx((0.55 + 5 * 0.6) / 6 - 0.5)
+    assert a["shift_vs_orig_eval"] == pytest.approx((0.55 + 5 * 0.6) / 6 - (0.8 + 5 * 0.5) / 6)
+    assert a["shift_per_seed"][0] == pytest.approx(0.55 - 0.8) and a["shift_per_seed"][3] == pytest.approx(0.1)
+    assert a["seed0_gap"] == pytest.approx(0.55 - 0.6) and a["seed0_gap_orig"] == pytest.approx(0.3)
+    assert rep["rep_gap_A"]["reused"] == {"n": 1, "mean_abs": pytest.approx(0.1)}
+    assert rep["rep_gap_A"]["fresh"]["n"] == 0  # ref_s0 rep 2 had backend errors and is dropped
     row = rep["vs_ref"]["A"]["rows"][0]
     assert row["diff"] == pytest.approx((0.25 + 5 * 0.3) / 6)
     assert row["sign_flip_p"] == pytest.approx(2 / 64)
@@ -56,3 +61,5 @@ def test_summarize_pairs_seeds_tasks_and_protocols(tmp_path):
     assert fate["lucky"]["n"] == 2 * len(SEEDS)
     rv = rep["repeat_variability_A"]
     assert rv["pairs"] == 1 and rv["mean_task_flip_rate"] == pytest.approx(0.1)
+    out = render(rep)
+    assert "Seed 0 minus the mean of seeds 1-5" in out and "reused 10.0 pp (n=1)" in out
