@@ -13,9 +13,14 @@ the task at its original `low` location so ONLY the storage/encoding mechanism c
     - `csv_lon360`    : every `.csv` point layer with longitudes converted to `[0, 360)` (west-of-Greenwich only,
                         so at least one longitude value actually changes). `estimate_utm_crs` raises on it as at
                         86N, and PROJ `aeqd` wraps the longitude, so a script that fell back to AEQD passes.
-  Far transfer (no probe writes it; every probe keeps the source raster's row order):
+  Far transfer (no probe writes it; every probe keeps the source raster's row order). Rasterio reads it
+  transparently, so the far comparison is expected to be uninformative (Amendment 2):
     - `raster_southup`: every `.tif` GeoTIFF stored south-up (rows flipped, transform with positive `e`), same
                         pixels and footprint, no resampling
+  Descriptive (far-transfer candidates that failed Amendment 2's calibration rule: retention among `low`-correct
+  Stage 3 scripts 100% and 98.8%, above the 90% ceiling):
+    - `vector_z`      : every geometry in `.gpkg` / `.geojson` layers written with Z = 0
+    - `multipart`     : every geometry in `.gpkg` / `.geojson` layers written as its multi-part type (one part)
 
 Reference truths are recomputed from the written files with each family's reference solver; any
 variant whose reference truth moves from `low` by more than build.py's invariance tolerance
@@ -38,7 +43,9 @@ import numpy as np
 import pandas as pd
 import rasterio
 from pyproj import CRS
+import shapely
 from rasterio.transform import Affine
+from shapely.geometry import MultiLineString, MultiPoint, MultiPolygon
 
 from . import build as B
 from .families import BY_NAME
@@ -50,6 +57,8 @@ MECHANISMS = (
     ("nodata_nan", "near"),
     ("csv_lon360", "adjacent"),
     ("raster_southup", "far"),
+    ("vector_z", "descriptive"),
+    ("multipart", "descriptive"),
 )
 TRANSFER = dict(MECHANISMS)
 
@@ -71,6 +80,17 @@ def _local_albers_crs(lat: float, lon: float) -> CRS:
         f"+proj=aea +lat_0={lat:.6f} +lon_0={lon:.6f} "
         f"+lat_1={lat_1:.6f} +lat_2={lat_2:.6f} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
     )
+
+
+_MULTI = {"Point": MultiPoint, "LineString": MultiLineString, "Polygon": MultiPolygon}
+
+
+def _to_multi(g):
+    return _MULTI[g.geom_type]([g]) if g is not None and not g.is_empty and g.geom_type in _MULTI else g
+
+
+def _vector_files(files: dict[str, str]) -> list[str]:
+    return [fn for fn in files.values() if fn.endswith((".gpkg", ".geojson"))]
 
 
 def _solve_dir(fam, params: dict, files: dict[str, str], d: Path) -> float:
@@ -100,6 +120,13 @@ def _write_one_mechanism(
         return None
     if mech in ("nodata_nan", "raster_southup") and not has_tif:
         return None
+    if mech in ("vector_z", "multipart"):
+        vec = _vector_files(files)
+        if not vec:
+            return None
+        if mech == "multipart" and not any(
+                (gpd.read_file(low_dir / fn).geom_type.isin(list(_MULTI))).any() for fn in vec):
+            return None  # every geometry is already multi-part: the variant would change no file
     if mech == "csv_lon360":
         if not has_csv:
             return None
@@ -163,6 +190,22 @@ def _write_one_mechanism(
                     with rasterio.open(dst_p, "w", **prof) as dst:
                         dst.write(arr[:, ::-1, :])
                 storage[stem] = "south-up (transform e > 0)"
+            else:
+                shutil.copy2(src_p, dst_p)
+                storage[stem] = "unchanged"
+
+    elif mech in ("vector_z", "multipart"):
+        for stem, fn in files.items():
+            src_p, dst_p = low_dir / fn, out_dir / fn
+            if fn.endswith((".gpkg", ".geojson")):
+                g = gpd.read_file(src_p)
+                if mech == "vector_z":
+                    g = g.set_geometry(shapely.force_3d(g.geometry.values, 0.0), crs=g.crs)
+                    storage[stem] = "Z = 0"
+                else:
+                    g = g.set_geometry(gpd.GeoSeries([_to_multi(x) for x in g.geometry], crs=g.crs))
+                    storage[stem] = "multi-part"
+                g.to_file(dst_p, driver="GPKG" if fn.endswith(".gpkg") else "GeoJSON")
             else:
                 shutil.copy2(src_p, dst_p)
                 storage[stem] = "unchanged"

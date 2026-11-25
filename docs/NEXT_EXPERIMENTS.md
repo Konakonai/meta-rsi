@@ -162,3 +162,15 @@ Source: `runs/agent_mail/carbon_reply_2.md`. Each point was checked first. Nothi
   - Of the 96 false rejections, 18 clear and 78 stay; no script newly fails.
   - 6 oracle-wrong scripts newly pass. One was rejected only by the unsplit-polygon bug. The other five drift 1.1–2.0% (tolerance): false acceptance rises 0.8→1.9%, 8.5→10.6% and 1.3→1.9% in the three populations.
   - The tolerance is settled in Amendment 3, after a rerun with the fixed probes at 1% separates the two fixes.
+
+**Calibration result (2026-11-26, 00:35 CST, under the rule above).** Retention among scripts correct on `low` (`scripts/rebuttal/calibrate_heldout_mech.py`):
+
+| Mechanism | `base_26b` rep 1 | `sft_meta` rep 1 | Pooled | Variants scored |
+|---|---|---|---|---|
+| `vector_z` | 298/298 | 288/288 | 100% | 419/419 |
+| `multipart` | 273/279 | 282/283 | 98.8% | 399/418 |
+| `raster_southup` | 91/91 | 100/100 | 100% | 160/160 |
+
+- Neither candidate falls in [10%, 90%], so far transfer stays `raster_southup` alone; `vector_z` and `multipart` are reported as descriptive. The 19 unscored `multipart` variants are `large_max_geodesic_span` tasks, where the reference solver's own answer changes on multi-part input.
+- By the rule fixed beforehand, E2's far comparison will be reported as uninformative about M1 unless the arms' own `lowok` falls below 90%. E2 then measures near transfer only.
+- What the calibration does show: on representation changes outside CRS and units (row order, Z, multi-part, NaN-free rasters), these scripts almost never break, because GeoPandas, Shapely and rasterio absorb the change. Their failures concentrate in the CRS, unit and nodata mechanisms that the gate's probes target.

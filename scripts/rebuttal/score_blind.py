@@ -42,10 +42,10 @@ LAT_DIST_BINS = ((0.0, 5.0), (5.0, 15.0), (15.0, 90.0))  # |lat - nearest reloca
 PROBE_ABS_LATS = (58.3, 56.2, 86.0)
 DOMAINS = ("equatorial", "utm_valid", "polar")  # |lat| <= 8; inside UTM's 84N / 80S limits; beyond them
 # E2 (docs/NEXT_EXPERIMENTS.md): held-out failure mechanisms; one confirmatory comparison on far transfer
-# (amended 2026-11-25, docs/NEXT_EXPERIMENTS.md "Amendment 1"): near = us_ft, albers, nodata_nan; adjacent = csv_lon360;
-# far = raster_southup
-MECHS = ("us_ft", "albers", "nodata_nan", "csv_lon360", "raster_southup")
-TRANSFERS = ("near", "adjacent", "far")
+# docs/NEXT_EXPERIMENTS.md Amendments 1-2: near = us_ft, albers, nodata_nan; adjacent = csv_lon360; far = raster_southup;
+# descriptive = vector_z, multipart (failed the calibration rule)
+MECHS = ("us_ft", "albers", "nodata_nan", "csv_lon360", "raster_southup", "vector_z", "multipart")
+TRANSFERS = ("near", "adjacent", "far", "descriptive")
 E2_CONFIRMATORY = ("arch_coev", "naive", "transfer:far")
 # blind area weight: within a band the centres are area-uniform, so the weight of a band is its share of the
 # sphere's area (sin hi - sin lo), split over the task's scored variants in that band; `large` tasks are
