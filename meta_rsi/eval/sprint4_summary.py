@@ -134,6 +134,7 @@ def _find_first(roots: list[Path], candidates: list[str]) -> Path | None:
 
 def summarize_gsb2(runs_dir: Path) -> dict:
     roots = [
+        runs_dir / "v8_s4_wave2_v2",
         runs_dir / "v7_s4_wave1c_g4b",
         runs_dir / "v7_s4_wave1c_g4a",
         runs_dir / "v7_s4_wave1b_g4b",

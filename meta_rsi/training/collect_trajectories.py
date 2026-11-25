@@ -129,12 +129,16 @@ def collect_trajectories(
 
     results: list[dict] = []
     if workers <= 1:
-        for t in tasks:
+        for idx, t in enumerate(tasks, 1):
             results.append(_one(t))
+            if idx % 50 == 0 or idx == len(tasks):
+                print(f"[collect:{filter_mode}] progress {idx}/{len(tasks)} ({time.time()-t0:.1f}s)", flush=True)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for r in ex.map(_one, tasks):
+            for idx, r in enumerate(ex.map(_one, tasks), 1):
                 results.append(r)
+                if idx % 50 == 0 or idx == len(tasks):
+                    print(f"[collect:{filter_mode}] progress {idx}/{len(tasks)} ({time.time()-t0:.1f}s)", flush=True)
 
     out_jsonl.parent.mkdir(parents=True, exist_ok=True)
     kept_rows = []
@@ -204,6 +208,9 @@ def main() -> None:
     ap.add_argument("--task-temp", type=float, default=0.0)
     ap.add_argument("--task-max-tokens", type=int, default=2048)
     ap.add_argument("--task-no-think", action="store_true")
+    ap.add_argument("--api-key", default=None, help="Optional API key (e.g. 'gcloud' for Vertex AI MaaS)")
+    ap.add_argument("--llm-timeout", type=float, default=180.0)
+    ap.add_argument("--exec-timeout", type=float, default=25.0)
     ap.add_argument("--workers", type=int, default=16)
     a = ap.parse_args()
 
@@ -211,9 +218,11 @@ def main() -> None:
         a.task_backend,
         a.task_model,
         base_url=a.task_url,
+        api_key=a.api_key,
         temperature=a.task_temp,
         max_tokens=a.task_max_tokens,
         enable_thinking=not a.task_no_think,
+        timeout=a.llm_timeout,
     )
     probes = (
         load_probes_from_dir(Path(a.probe_dir), Path(a.out).parent / "_probe_mods")
@@ -229,10 +238,11 @@ def main() -> None:
         custom_probes=probes,
         train_offset=a.train_offset,
         train_per_family=a.train_per_family,
+        exec_timeout=a.exec_timeout,
         workers=a.workers,
     )
     print(json.dumps(summary, indent=2), flush=True)
-    if summary["usage"]["errors"] > 0:
+    if summary["usage"]["errors"] > 0 or summary["usage"]["calls"] < summary["n_total"]:
         sys.exit(2)
 
 

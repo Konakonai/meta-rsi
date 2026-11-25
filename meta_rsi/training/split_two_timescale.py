@@ -357,6 +357,7 @@ def run_grpo_stage(
     clip_eps: float = 0.2,
     sync_every: int = 2,
     score_workers: int = 16,
+    exec_timeout: float = 25.0,
     seed: int = 42,
 ) -> dict:
     import torch
@@ -422,7 +423,7 @@ def run_grpo_stage(
                         data_root,
                         reward_mode=reward_mode,
                         custom_probes=custom_probes,
-                        timeout=20.0,
+                        timeout=exec_timeout,
                     ),
                     flat_pairs,
                 )
@@ -600,6 +601,7 @@ def main() -> None:
     ap.add_argument("--max-seq-len", type=int, default=1536)
     ap.add_argument("--max-completion-tokens", type=int, default=1024)
     ap.add_argument("--probe-dir", default="", help="Optional dir of certified metamorphic probe .py files")
+    ap.add_argument("--exec-timeout", type=float, default=25.0)
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
@@ -716,6 +718,7 @@ def main() -> None:
                 lr=a.grpo_lr,
                 beta=a.grpo_beta,
                 sync_every=a.sync_every,
+                exec_timeout=a.exec_timeout,
                 seed=a.seed,
             )
     finally:
