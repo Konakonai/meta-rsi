@@ -211,16 +211,17 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
                 for s in strata(t, vn, rec["task_id"] in low_ok):
                     num[s][i] += x["correct"]
                     den[s][i] += 1
-                if heldout and ev_recs:  # change from `low` for the same script: variant correct - low correct
-                    for s in (f"drop:transfer:{t['variants'][vn]['transfer']}", f"drop:mech:{t['variants'][vn]['mechanism']}"):
-                        num[s][i] += float(x["correct"]) - float(rec["task_id"] in low_ok)
-                        den[s][i] += 1
                 if not heldout:  # area weight: undoes the equal quota per band (Addendum 3)
                     band = t["variants"][vn]["band"]
                     n_b = sum(1 for wn in rec["variants"] if t["variants"][wn]["band"] == band)
                     w = (BAND_AREA[band] if band in BAND_AREA else 1.0) / n_b
                     num["all_areaw"][i] += w * x["correct"]
                     den["all_areaw"][i] += w
+        if heldout and ev_recs:  # `low` correct, per task with a scored variant: the base for `bothlow` (Amendment 2)
+            for rec in json.loads(f.read_text())["records"]:
+                if rec["variants"]:
+                    num["low"][tidx[rec["task_id"]]] += float(rec["task_id"] in low_ok)
+                    den["low"][tidx[rec["task_id"]]] += 1
         # the same scripts on the designed non-low variants (high / polar / antimeridian / mid / zone_edge)
         if ev_recs:
             for rec in ev_recs:
@@ -256,6 +257,20 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
             return None
         return ss, x1[:, ok], x2[:, ok], fam[ok], [float(np.mean(x1[i, ok] - x2[i, ok])) for i in range(len(ss))]
 
+    def paired_bothlow(mth: str, ref: str, s: str):
+        """Retention difference without baseline bias: per seed, only tasks both methods solved on `low` in every
+        repeat of that seed; the task set may differ between seeds (Amendment 2)."""
+        sa, sb, la, lb = seed_matrix(mth, s), seed_matrix(ref, s), seed_matrix(mth, "low"), seed_matrix(ref, "low")
+        ss = sorted(set(sa) & set(sb) & set(la) & set(lb))
+        diffs, ns = [], []
+        for k in ss:
+            ok = (~np.isnan(sa[k]) & ~np.isnan(sb[k]) & (np.nan_to_num(la[k]) == 1.0) & (np.nan_to_num(lb[k]) == 1.0))
+            if not ok.any():
+                return None
+            diffs.append(float(np.mean(sa[k][ok] - sb[k][ok])))
+            ns.append(int(ok.sum()))
+        return (ss, diffs, ns) if ss else None
+
     rep = {"blind_root": str(root), "kind": "heldout" if heldout else "blind", "drop_reused_rep1": drop_reused_rep1,
            "methods": {}, "vs_ref": {}}
     for mth in methods:
@@ -284,6 +299,8 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
             row["by_stratum_p"] = {}
             row["by_stratum_t95"] = {}
             for s in all_strata:
+                if s.startswith("lowok:") or s == "low":
+                    continue  # method-specific task sets: in the method table only; `bothlow` is the paired version
                 pr = paired(mth, ref, s)
                 if pr is None:
                     continue
@@ -292,6 +309,14 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
                 row["by_stratum_p"][s] = sign_flip_p(s_diffs)
                 row["by_stratum_t95"][s] = t_interval(s_diffs)
                 row["by_stratum_ci95"][s] = hier_bootstrap_ci(s_x1, s_x2, s_fm, n_boot=n_boot)
+            if heldout:
+                row["bothlow"] = {}
+                for s in [f"transfer:{t}" for t in TRANSFERS] + [f"mech:{m}" for m in MECHS]:
+                    pb = paired_bothlow(mth, ref, s)
+                    if pb is not None:
+                        ss, d, ns = pb
+                        row["bothlow"][s] = {"diff": float(np.mean(d)), "per_seed_diff": d, "n_tasks_per_seed": ns,
+                                             "sign_flip_p": sign_flip_p(d), "t_ci95": t_interval(d)}
             rows.append(row)
         for r, p in zip(rows, holm([r["sign_flip_p"] for r in rows])):
             r["holm_p"] = p
@@ -302,28 +327,34 @@ def summarize(out: Path, root: Path, refs: list[str], n_boot: int = 4000, drop_r
         if pr is not None:
             seeds, _, _, _, diffs = pr
             p = sign_flip_p(diffs)
-            rep["confirmatory"] = {"method": mth, "ref": ref, "stratum": s, "seeds": seeds, "diff": float(np.mean(diffs)),
-                                   "per_seed_diff": diffs, "sign_flip_p": p, "t_ci95": t_interval(diffs),
-                                   "established": bool(p < 0.05)}
+            c = rep["confirmatory"] = {"method": mth, "ref": ref, "stratum": s, "seeds": seeds, "diff": float(np.mean(diffs)),
+                                       "per_seed_diff": diffs, "sign_flip_p": p, "t_ci95": t_interval(diffs),
+                                       "established": bool(p < 0.05)}
+            pb = paired_bothlow(mth, ref, s)
+            c["bothlow_diff"] = float(np.mean(pb[1])) if pb else None
+            ret = [rep["methods"].get(x, {}).get(f"lowok:{s}", {}).get("mean") for x in (mth, ref)]
+            c["lowok"] = ret
+            # Amendment 2 readings: robustness transfer needs a same-sign `bothlow` difference; a mechanism that
+            # both methods survive (>= 90%) or fail (<= 10%) on solved tasks cannot separate them
+            c["uninformative"] = bool(None not in ret and (min(ret) >= 0.9 or max(ret) <= 0.1))
+            c["robustness_transfer"] = bool(c["established"] and not c["uninformative"] and c["bothlow_diff"] is not None
+                                            and np.sign(c["bothlow_diff"]) == np.sign(c["diff"]))
     return rep
 
 
 def render_heldout(rep: dict) -> str:
     cols = (["designed", "all"] + [f"transfer:{t}" for t in TRANSFERS] + [f"mech:{m}" for m in MECHS]
-            + ["matched:near", "matched:far", "lowok:transfer:near", "lowok:transfer:far", "drop:transfer:near",
-               "drop:transfer:far"])
+            + ["matched:near", "matched:far", "low", "lowok:transfer:near", "lowok:transfer:far"])
     labels = [c.split(":")[-1] if c.split(":")[0] in ("transfer", "mech") or ":" not in c
               else f"{c.split(':')[0][:5]}:{c.split(':')[-1]}" for c in cols]
     lines = ["Held-out mechanism accuracy (E2; share of scored variants correct; mean over seeds). `near`: us_ft, albers,",
              "nodata_nan; `adjacent`: csv_lon360; `far`: raster_southup. `match`: only tasks with both near and far variants.",
              "`lowok`: only tasks the same script got right on `low` (task sets differ by method, so descriptive only).",
-             "`drop`: variant correct minus `low` correct for the same script, per task (pp; negative = broken by the mechanism).",
+             "`low`: the same scripts on `low`. Comparisons add `bothlow`: per seed, only tasks both methods solved on `low`.",
              "Drop reused rep 1: " + str(rep.get("drop_reused_rep1")),
              f"{'method':16s} " + " ".join(f"{lab:>11s}" for lab in labels)]
     for m, d in rep["methods"].items():
-        lines.append(f"{m:16s} " + " ".join(
-            (f"{100 * d[c]['mean']:+10.1f} " if c.startswith("drop:") else f"{100 * d[c]['mean']:10.1f}%") if c in d
-            else f"{'-':>11s}" for c in cols))
+        lines.append(f"{m:16s} " + " ".join(f"{100 * d[c]['mean']:10.1f}%" if c in d else f"{'-':>11s}" for c in cols))
     if "confirmatory" in rep:
         c = rep["confirmatory"]
         lo, hi = c["t_ci95"]
@@ -331,18 +362,25 @@ def render_heldout(rep: dict) -> str:
                      f"per seed [{', '.join(f'{100 * x:+.1f}' for x in c['per_seed_diff'])}], exact sign-flip "
                      f"p={c['sign_flip_p']:.4f}, t5 95% [{100 * lo:+.1f}, {100 * hi:+.1f}], n_seeds={len(c['seeds'])} -> "
                      + ("ESTABLISHED" if c["established"] else "not established"))
+        bl = "-" if c.get("bothlow_diff") is None else f"{100 * c['bothlow_diff']:+.1f} pp"
+        rt = ", ".join("-" if x is None else f"{100 * x:.1f}%" for x in c.get("lowok", []))
+        lines.append(f"  bothlow {bl}; lowok (method, ref) {rt}; uninformative={c.get('uninformative')}; "
+                     f"robustness transfer={c.get('robustness_transfer')}")
     for ref, rows in rep["vs_ref"].items():
         lines.append(f"\nvs {ref} (descriptive): seed-paired difference (pp) [t5 95%], sign-flip p")
         for r in rows:
             parts = []
-            for key in ("all", "transfer:near", "transfer:adjacent", "transfer:far", "matched:near", "matched:far",
-                        "drop:transfer:far"):
+            for key in ("all", "transfer:near", "transfer:adjacent", "transfer:far", "matched:near", "matched:far"):
                 if key in r["by_stratum"] or key == "all":
                     d = r["diff"] if key == "all" else r["by_stratum"][key]
                     lo, hi = r["t_ci95"] if key == "all" else r["by_stratum_t95"][key]
                     pv = r["sign_flip_p"] if key == "all" else r["by_stratum_p"][key]
-                    parts.append(f"{key.split(':')[0][:5] + ':' if key.startswith(('matched', 'drop')) else ''}{key.split(':')[-1]} "
+                    parts.append(f"{key.split(':')[0][:5] + ':' if key.startswith('matched') else ''}{key.split(':')[-1]} "
                                  f"{100 * d:+.1f} [{100 * lo:+.1f}, {100 * hi:+.1f}] p={pv:.3f}")
+            for key in ("transfer:near", "transfer:far"):
+                if key in r.get("bothlow", {}):
+                    b = r["bothlow"][key]
+                    parts.append(f"bothlow:{key.split(':')[1]} {100 * b['diff']:+.1f} p={b['sign_flip_p']:.3f}")
             lines.append(f"  {r['method']:16s} " + "  | ".join(parts) + f"  n_seeds={len(r['seeds'])}")
     return "\n".join(lines)
 

@@ -130,9 +130,8 @@ def test_heldout_summary_strata_and_confirmatory(tmp_path):
     # lowok: naive got only t0 right on `low`
     assert nv["lowok:transfer:far"]["mean"] == pytest.approx(0.0)
     assert rep["methods"]["arch_coev"]["lowok:transfer:far"]["mean"] == pytest.approx(1.0)
-    # drop = variant correct - low correct: naive is right on low only for t0 -> far drops: t0 -1, t1 0, t3 0
-    assert nv["drop:transfer:far"]["mean"] == pytest.approx(-1 / 3)
-    assert nv["drop:transfer:near"]["mean"] == pytest.approx((0 + 1 + 1) / 3)
+    assert nv["low"]["mean"] == pytest.approx(1 / 4)  # naive solves only t0 on `low`
+    assert not any(k.startswith("drop:") for k in nv)
 
     row = rep["vs_ref"]["naive"][0]
     assert row["by_stratum"]["transfer:far"] == pytest.approx(1.0)
@@ -140,6 +139,12 @@ def test_heldout_summary_strata_and_confirmatory(tmp_path):
     c = rep["confirmatory"]
     assert (c["method"], c["ref"], c["stratum"]) == ("arch_coev", "naive", "transfer:far")
     assert c["diff"] == pytest.approx(1.0) and c["sign_flip_p"] == pytest.approx(2 / 64) and c["established"]
+    # bothlow: only t0 is solved on `low` by both; its far variant (nodata_nan, labelled far here): arch 1, naive 0
+    assert row["bothlow"]["transfer:far"]["diff"] == pytest.approx(1.0)
+    assert row["bothlow"]["transfer:near"]["diff"] == pytest.approx(0.0)
+    assert not any(k.startswith("lowok:") for k in row["by_stratum"])
+    assert c["bothlow_diff"] == pytest.approx(1.0) and c["lowok"] == [pytest.approx(1.0), pytest.approx(0.0)]
+    assert not c["uninformative"] and c["robustness_transfer"]
     text = score_blind.render(rep)
     assert "CONFIRMATORY (E2)" in text and "ESTABLISHED" in text and "csv_lon360" in text
 

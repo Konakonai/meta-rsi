@@ -10,6 +10,8 @@ oracle calls wrong. The first failing probe is recorded, so rejections can be at
 certified probe, inconsistent answer vs crash).
 
     nix-shell --run "python scripts/rebuttal/gate_precision.py"   # -> runs/v11_gate_precision/
+    # E1 gate (docs/NEXT_EXPERIMENTS.md): fixed polar probe, 2% agreement tolerance, separate output files
+    nix-shell --run "python scripts/rebuttal/gate_precision.py --probe-dir scripts/rebuttal/probes_e1 --rel-tol 0.02 --tag _e1"
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ def _code(row: dict) -> str | None:
     return m.group(1) if m else None
 
 
-def judge(row: dict, task: dict, data_root: Path, probes, timeout: float) -> dict:
+def judge(row: dict, task: dict, data_root: Path, probes, timeout: float, rel_tol: float = 0.01) -> dict:
     code = _code(row)
     rec = {"task_id": row["task_id"], "family": task["family"], "uses_3857": bool(row.get("uses_3857"))}
     sc = oracle_score(task, code, data_root, timeout=timeout)
@@ -57,7 +59,7 @@ def judge(row: dict, task: dict, data_root: Path, probes, timeout: float) -> dic
         return rec
     ok, diag, details = _run_metamorphic_check(
         code, data_root / task["variants"]["low"]["dir"], low["value"], task["answer"],
-        timeout=timeout, custom_probes=probes,
+        timeout=timeout, custom_probes=probes, rel_tol=rel_tol,
     )
     rec["gate"] = "pass" if ok else "fail"
     if not ok:
@@ -105,20 +107,23 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="first N scripts per population (smoke runs)")
     ap.add_argument("--workers", type=int, default=18)
     ap.add_argument("--timeout", type=float, default=25.0)
+    ap.add_argument("--rel-tol", type=float, default=0.01, help="gate agreement tolerance (the oracle's is 0.01)")
+    ap.add_argument("--tag", default="", help="suffix for the output files, e.g. _e1")
     a = ap.parse_args()
 
     data_root = Path(a.data_root)
     tasks = {t["task_id"]: t for t in map(json.loads, open(data_root / "tasks.jsonl"))}
-    probes = load_probes_from_dir(Path(a.probe_dir), OUT / "_probe_mods")
+    probes = load_probes_from_dir(Path(a.probe_dir), OUT / f"_probe_mods{a.tag}")
     assert probes and len(probes) == 3, f"expected 3 certified probes in {a.probe_dir}"
-    summary = {"probes": ["shift_and_shuffle", "crs_storage_flip (gpkg/raster tasks)"] + [p for p, _ in probes]}
+    summary = {"probes": ["shift_and_shuffle", "crs_storage_flip (gpkg/raster tasks)"] + [p for p, _ in probes],
+               "probe_dir": str(a.probe_dir), "rel_tol": a.rel_tol}
     for pop in a.populations.split(","):
         rows = [json.loads(ln) for ln in open(Path(a.traj_dir) / f"{pop}.jsonl")]
         rows = rows[: a.limit] if a.limit else rows
         t0 = time.time()
         with ThreadPoolExecutor(max_workers=a.workers) as ex:
-            recs = list(ex.map(lambda r: judge(r, tasks[r["task_id"]], data_root, probes, a.timeout), rows))
-        with open(OUT / f"gate_vs_oracle_{pop}.jsonl", "w") as f:
+            recs = list(ex.map(lambda r: judge(r, tasks[r["task_id"]], data_root, probes, a.timeout, a.rel_tol), rows))
+        with open(OUT / f"gate_vs_oracle_{pop}{a.tag}.jsonl", "w") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
         s = summary[pop] = summarize(recs) | {"source": POPULATIONS.get(pop, pop), "elapsed_s": round(time.time() - t0, 1)}
@@ -127,7 +132,7 @@ def main() -> None:
               f"| full gate FRR={100 * g['false_rejection_rate']:.1f}% FAR={100 * g['false_acceptance_rate']:.1f}% "
               f"| built-in only FRR={100 * b['false_rejection_rate']:.1f}% FAR={100 * b['false_acceptance_rate']:.1f}% "
               f"({s['elapsed_s']}s)", flush=True)
-    (OUT / "gate_precision_summary.json").write_text(json.dumps(summary, indent=2))
+    (OUT / f"gate_precision_summary{a.tag}.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps({k: v for k, v in summary.items() if k != "probes"}, indent=1)[:6000])
 
 
