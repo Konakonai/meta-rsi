@@ -38,6 +38,8 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from meta_rsi.eval.eval_test import code_sidecar  # noqa: E402
+
 DEFAULT_OUT = REPO / "runs/v10_unified_6seed"
 MODEL_ID = "google/gemma-4-26B-A4B-it"
 METHODS = ["naive", "darwinx_soft", "llm_judge", "oracle_soft", "meta_gate_only", "meta_T0", "coev_tip_only", "arch_coev"]
@@ -97,7 +99,11 @@ def is_clean(path: Path, min_n: int) -> bool:
         return False
     u = d.get("usage") or {}
     n = int((d.get("ALL") or {}).get("n", 0))
-    return n >= min_n and int(u.get("errors", 1)) == 0 and int(u.get("calls", 0)) >= n and len(d.get("records") or []) == n
+    ok = n >= min_n and int(u.get("errors", 1)) == 0 and int(u.get("calls", 0)) >= n and len(d.get("records") or []) == n
+    if ok and d.get("protocol", "A") == "A":  # Protocol A also needs its scripts, for blind-variant scoring
+        cp = code_sidecar(path)
+        ok = cp.exists() and sum(1 for _ in open(cp)) == n
+    return ok
 
 
 def cmd_inventory(a: argparse.Namespace) -> None:
@@ -134,8 +140,10 @@ def cmd_inventory(a: argparse.Namespace) -> None:
             # An existing eval made with records on the same server settings counts as Protocol A rep 1.
             reuse = out / "evals" / f"{tag}_A_rep1.json"
             if (orig.get("records") and orig.get("model") == a.model and orig.get("temp") == 0.0
-                    and orig.get("no_think") and orig.get("protocol", "A") == "A" and not reuse.exists()):
+                    and orig.get("no_think") and orig.get("protocol", "A") == "A" and not reuse.exists()
+                    and code_sidecar(ev).exists()):
                 shutil.copy2(ev, reuse)
+                shutil.copy2(code_sidecar(ev), code_sidecar(reuse))
                 entries[-1]["reused_A_rep1"] = True
     manifest = {"model": a.model, "data_root": "data/v2", "entries": entries, "missing": missing}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -329,11 +337,11 @@ def cmd_fetch(a: argparse.Namespace) -> None:
     out = Path(a.out).resolve()
     remote = f"/content/unified_work/{out.relative_to(REPO)}/evals"
     listing = subprocess.run(["colab", "ls", "-s", a.session, remote], capture_output=True, text=True, check=True).stdout
-    names = [ln.strip() for ln in listing.splitlines() if ln.strip().endswith(".json")]
+    names = [ln.strip() for ln in listing.splitlines() if ln.strip().endswith((".json", ".code.jsonl"))]
     got = 0
-    for name in names:
+    for name in sorted(names, key=lambda n: n.endswith(".json")):  # sidecars first, so is_clean can see them
         dst = out / "evals" / name
-        if dst.exists() and is_clean(dst, 1):
+        if dst.exists() and (name.endswith(".code.jsonl") or is_clean(dst, 1)):
             continue
         _colab(["download", "-s", a.session, f"{remote}/{name}", str(dst)], check=False)
         got += 1

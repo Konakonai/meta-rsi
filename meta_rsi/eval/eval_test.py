@@ -106,6 +106,11 @@ def _evaluate_protocol_b(
     return records, avg_calls
 
 
+def code_sidecar(out_path: Path) -> Path:
+    """`x_A_rep1.json` -> `x_A_rep1.code.jsonl`: the Protocol A script per task, for offline re-scoring."""
+    return out_path.with_name(out_path.stem + ".code.jsonl")
+
+
 def task_records(records: list[dict], tasks: list[dict], protocol: str) -> list[dict]:
     """Compact per-task records for the output JSON (no code or prompts).
 
@@ -284,6 +289,10 @@ def main() -> None:
     out_path = Path(a.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out_obj, indent=2))
+    if a.protocol == "A":  # the one script per task, so it can be scored later on new variants (e.g. blind ones)
+        with open(code_sidecar(out_path), "w") as f:
+            for r in records:
+                f.write(json.dumps({"task_id": r["task_id"], "code": r.get("code")}) + "\n")
 
     print(f"=== Unseen Test Eval [Protocol {a.protocol}] (n={out_obj['ALL']['n']}): {a.harness} ({elapsed}s, avg_calls={out_obj['avg_llm_calls']:.2f}) ===")
     for k in ("ALL", "SEEN", "HELDOUT"):
