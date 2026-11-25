@@ -1,9 +1,11 @@
 """Build expanded 8-city × 12-template (96-task) real OpenStreetMap global GIS benchmark (`data/osm_global/`).
 
 Directly addresses external-validity (M5) and non-invariant task boundary (M1) critiques:
-  - 8 real cities spanning Equatorial (Singapore, Quito), Southern Hemisphere (Sydney),
-    Near-Antimeridian Pacific (Suva), High-Latitude (Helsinki, Reykjavik), Arctic Circle (Tromso),
+  - 8 real cities spanning Equatorial (Singapore, Quito), Southern Hemisphere (Sydney, Wellington),
+    High-Latitude (Helsinki, Reykjavik), Arctic Circle (Tromso),
     and High Arctic (Longyearbyen, 78.22N — Web Mercator area distortion > 24x!).
+    Wellington (174.78E) sits west of 180°, so the antimeridian is NOT exercised on real data, and no
+    city lies beyond the UTM range (84N / 80S); those cases exist only as GSB v2 synthetic variants.
   - 12 distinct executable GIS task templates:
       * 9 metric templates (including 3 brand-new geometric/statistical tasks never in GSB v2:
         building perimeter km, 2nd-nearest POI median spacing, road convex-hull density)

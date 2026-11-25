@@ -122,7 +122,7 @@ Key takeaways:
 All 16 evaluation JSONs (`runs/v6_gsb_v2_s3/`, `runs/v6_gsb_v2_s3b/`, `runs/v6_gsb_v2_s3b_stage2/`) passed strict auditing with **`usage.errors == 0`**.
 
 ### 1. GSB v2 Benchmark (`data/v2`, 1,950 Tasks) & 4-Tier Separation (`n = 450`: 300 Seen + 150 Held-Out)
-- **Deterministic audit (`docs/gsb_v2_audit.log`)**: `reference_pass = 1,950/1,950 (100%)`, `utm_pass = 0/1,950`, `webmercator_pass = 0/1,710` on projection/raster/large families while `wm_low_pass = 95.1%` (CompV) and `93.0%` (Rast) under `|lat| <= 1.5°`, `naive_nodata_caught = 660/660 (100%)`.
+- **Deterministic audit (`docs/gsb_v2_audit.log`)**: `reference_pass = 1,950/1,950 (100%)`, `utm_pass = 0/1,950`, `webmercator_pass = 0/1,710` on projection/raster/large families while `wm_low_pass = 95.1%` (CompV) and `93.0%` (Rast) under `|lat| <= 1.5°`, `naive_nodata_caught = 627/660 (95.0%)` (33 naive scripts still pass: `raster_pop_exposure` 27, `raster_zonal_mean` 5, `raster_corridor_elevation` 1; 0 errors).
 - **Single-seed 4-tier ladder on `data/v2` (`google/gemma-4-26B-A4B-it` no-think vs `E4B`)**:
 
 | Configuration | Model | **ALL (`n=450`)** | **Seen (`n=300`)** | **HO (`n=150`)** | **`Lucky`** | **`SilW`** | **`Err`** | Calls | `CompV` | `Rast` | `Large` | `Ctrl` |

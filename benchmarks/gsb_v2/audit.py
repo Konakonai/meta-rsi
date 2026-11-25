@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+import rasterio.features
+import shapely
 from pyproj import CRS
 
 from benchmarks.gsb.harness import matches
@@ -42,9 +44,6 @@ def _naive_raster_eval(fam_name: str, layers, rasters, params) -> float | None:
         return g.to_crs(rcrs)
 
     if fam_name == "raster_slope_exceed_area":
-        import rasterio.features
-        import shapely
-
         b = _proj(layers["basin"])
         u = shapely.union_all(list(b.geometry))
         m = rasterio.features.geometry_mask([u], out_shape=arr.shape, transform=tr, invert=True)
@@ -53,9 +52,6 @@ def _naive_raster_eval(fam_name: str, layers, rasters, params) -> float | None:
         return float(np.sum(m & (slope > params["slope_deg"])) * pix_area * 1e-4)
 
     # For vector+raster families, project vector to raster CRS and ignore nodata sentinel
-    import rasterio.features
-    import shapely
-
     if fam_name == "raster_zonal_mean":
         z = _proj(layers["zones"])
         u = shapely.union_all(list(z[z["landuse"] == params["landuse"]].geometry))
@@ -163,6 +159,8 @@ def _audit_one_family(args: tuple[str, str, list[dict]]) -> tuple[str, dict[str,
             "wm_low_pass": 0,
             "webmercator_lucky": 0,
             "naive_nodata_caught": 0,
+            "naive_nodata_pass": 0,
+            "naive_nodata_error": 0,
         },
     )
     for t in fam_tasks:
@@ -186,16 +184,21 @@ def _audit_one_family(args: tuple[str, str, list[dict]]) -> tuple[str, dict[str,
             else:
                 f[f"{mode}_fail"] += 1
         if fam.has_raster:
-            noks = []
-            for v, info in t["variants"].items():
+            # A detected numeric error requires finite outputs on every variant.
+            outcome = "naive_nodata_pass"
+            for info in t["variants"].values():
                 layers, rasters = read_workspace(root / info["dir"], t["files"])
                 try:
                     val = _eval_method(fam, layers, rasters, t["params"], "naive_raster")
-                    ok = bool(np.isfinite(val) and matches(val, info["truth"], t["answer"]))
                 except Exception:
-                    ok = False
-                noks.append(ok)
-            f["naive_nodata_caught"] += int(not all(noks))
+                    outcome = "naive_nodata_error"
+                    break
+                if not np.isfinite(val):
+                    outcome = "naive_nodata_error"
+                    break
+                if not matches(val, info["truth"], t["answer"]):
+                    outcome = "naive_nodata_caught"
+            f[outcome] += 1
     return fam_name, dict(f)
 
 
@@ -221,12 +224,14 @@ def audit_dataset(root: Path, limit_per_family: int = 0, workers: int = 10) -> d
             for fn, res in ex.map(_audit_one_family, jobs):
                 table[fn] = res
 
-    cols = ["n", "reference_pass", "utm_pass", "webmercator_pass", "wm_low_pass", "webmercator_lucky", "naive_nodata_caught"]
-    print("family".ljust(28) + "".join(c[:11].rjust(12) for c in cols))
-    print("-" * (28 + 12 * len(cols)))
+    cols = ["n", "reference_pass", "utm_pass", "webmercator_pass", "wm_low_pass", "webmercator_lucky",
+            "naive_nodata_caught", "naive_nodata_pass", "naive_nodata_error"]
+    header = "family".ljust(28) + "".join(c.rjust(max(5, len(c) + 2)) for c in cols)
+    print(header)
+    print("-" * len(header))
     for fam_name in sorted(table):
         f = defaultdict(int, table[fam_name])
-        print(fam_name.ljust(28) + "".join(str(f[c]).rjust(12) for c in cols))
+        print(fam_name.ljust(28) + "".join(str(f[c]).rjust(max(5, len(c) + 2)) for c in cols))
     return table
 
 

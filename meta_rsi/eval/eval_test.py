@@ -1,4 +1,9 @@
-"""Evaluate any saved harness.py on the FULL 480-task data/v1 test split (apples-to-apples with zero_shot_v1)."""
+"""Evaluate a saved harness.py on the full test split of a task set (data/v1, data/v2, data/osm_*).
+
+Families with train tasks count as SEEN, the rest as HELDOUT. The legacy keys SEEN_18 / HELDOUT_3 (named
+after data/v1's 18 + 3 families) repeat the same numbers for older scripts; on data/v2 they are really
+15 + 5 families, and the OSM sets have no train split, so every task there is HELDOUT.
+"""
 from __future__ import annotations
 
 import argparse
@@ -247,6 +252,8 @@ def main() -> None:
         }
 
     all_cnt = seen_cats + ho_cats
+    test_fams = {t["family"] for t in test_tasks}
+    n_seen_fams, n_ho_fams = len(test_fams & train_fams), len(test_fams - train_fams)
     out_obj = {
         "harness": a.harness,
         "protocol": a.protocol,
@@ -257,8 +264,10 @@ def main() -> None:
         "avg_llm_calls": avg_calls,
         "usage": llm.usage.to_dict(),
         "ALL": rates(all_cnt),
-        "SEEN_18": rates(seen_cats),
-        "HELDOUT_3": rates(ho_cats),
+        "SEEN": {**rates(seen_cats), "n_families": n_seen_fams},
+        "HELDOUT": {**rates(ho_cats), "n_families": n_ho_fams},
+        "SEEN_18": rates(seen_cats),  # legacy name, same numbers as SEEN
+        "HELDOUT_3": rates(ho_cats),  # legacy name, same numbers as HELDOUT
         "per_family": {fam: rates(cnt) for fam, cnt in sorted(by_fam.items())},
     }
     if by_var:
@@ -277,10 +286,11 @@ def main() -> None:
     out_path.write_text(json.dumps(out_obj, indent=2))
 
     print(f"=== Unseen Test Eval [Protocol {a.protocol}] (n={out_obj['ALL']['n']}): {a.harness} ({elapsed}s, avg_calls={out_obj['avg_llm_calls']:.2f}) ===")
-    for k in ("ALL", "SEEN_18", "HELDOUT_3"):
+    for k in ("ALL", "SEEN", "HELDOUT"):
         r = out_obj[k]
+        label = k if k == "ALL" else f"{k} ({r['n_families']} fams)"
         print(
-            f"  {k:<10} (n={r['n']:3d}): correct={r['correct']*100:5.1f}%  "
+            f"  {label:<20} (n={r['n']:3d}): correct={r['correct']*100:5.1f}%  "
             f"lucky={r['lucky']*100:5.1f}%  silent_wrong={r['silent_wrong']*100:5.1f}%  "
             f"error={r['error']*100:5.1f}%"
         )
