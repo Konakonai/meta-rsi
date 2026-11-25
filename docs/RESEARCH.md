@@ -169,9 +169,9 @@ All 59 Sprint 4 Wave 1A, 1B, and 1C evaluation JSONs (`runs/v7_s4_wave1{a,b,c}_g
 | Zero-shot `seed.py` | 1 | 30.7% | 33.0% | 26.0% | 44.4% | 10.7% | 2.2% | 31.9% | 1.00 |
 | Static `handcrafted.py` | 1 | 35.1% | 40.7% | 24.0% | 11.3% | 49.6% | 0.0% | 30.0% | 1.15 |
 | Inference-time `runtime_meta.py` | 1 | 57.1% | 57.3% | 56.7% | 21.6% | 10.9% | 49.4% | 44.4% | 2.61 |
-| `naive` (s0) | 1 | 46.9% | 49.7% | 41.3% | 31.6% | 8.4% | 22.8% | 40.0% | 1.43 |
-| `meta_gate_only` (zero diagnostic text, s0) | 1 | 53.6% | 50.0% | 60.7% | 13.6% | 16.7% | 55.6% | 44.4% | 1.42 |
-| `oracle_soft` (3-location oracle upper bound, s0) | 1 | 55.3% | 53.7% | 58.7% | 22.4% | 12.0% | 46.1% | 40.6% | 1.44 |
+| `naive` (s0; 6 seeds: 34.4 ± 6.2%, §2.5) | 1 | 46.9% | 49.7% | 41.3% | 31.6% | 8.4% | 22.8% | 40.0% | 1.43 |
+| `meta_gate_only` (zero diagnostic text, s0; 6 seeds: 37.2 ± 8.4%, §2.5) | 1 | 53.6% | 50.0% | 60.7% | 13.6% | 16.7% | 55.6% | 44.4% | 1.42 |
+| `oracle_soft` (3-location oracle upper bound, s0; 6 seeds: 39.3 ± 10.7%, §2.5) | 1 | 55.3% | 53.7% | 58.7% | 22.4% | 12.0% | 46.1% | 40.6% | 1.44 |
 | `darwinx_soft` (weak `dev_low`) | 6 | 31.9 ± 1.2% | 33.7 ± 2.1% | 28.3 ± 4.4% | 50.3 ± 3.6% | 5.6 ± 3.7% | 1.3 ± 1.1% | 37.7 ± 3.2% | 1.11 ± 0.09 |
 | `meta_T0` (fixed mid-latitude probe) | 6 | 23.6 ± 5.2% | 28.8 ± 2.6% | 13.0 ± 10.6% | 18.4 ± 22.1% | 41.2 ± 25.3% | 0.7 ± 0.7% | 29.8 ± 4.9% | 1.22 ± 0.23 |
 | `llm_judge` (static code-review rubric) | 6 | 39.5 ± 14.4% | 40.9 ± 11.6% | 36.7 ± 21.4% | 19.8 ± 10.0% | 17.6 ± 18.8% | 20.8 ± 21.2% | 37.1 ± 7.7% | 1.32 ± 0.10 |
@@ -182,7 +182,7 @@ Key empirical observations from Wave 1A/1B/1C:
 - **6/6 Weak-Verifier Lock-In (`darwinx_soft`)**: Across all 6 paired seeds (`32.2 / 31.1 / 31.8 / 32.0 / 34.0 / 30.4%`), soft regression gating on `dev_low` remains strictly locked in around `31.9 ± 1.2%` (`CompV = 1.3 ± 1.1%`, `Lucky = 50.3 ± 3.6%`).
 - **6/6 Second-Order Lock-In under Fixed Mid-Lat Verifier (`meta_T0`)**: All 6 seeds fall at or below `seed.py` (`22.9 / 17.6 / 30.0 / 19.1 / 29.6 / 22.2%`, mean `23.6 ± 5.2%`); every converged run (`s0, s1, s3, s5`) adopts `gdf.estimate_utm_crs()` and crashes on polar/antimeridian test tasks (`Err = 55–60%`, `CompV = 0.0–1.7%`).
 - **Static LLM-as-a-Judge (`llm_judge`) Variance & UTM Blindspot**: Static rubric evaluation produces high seed variance (`30.0 / 51.1 / 48.0 / 32.7 / 56.2 / 19.1%`, mean `39.5 ± 14.4%`). In `s5`, the judge approved a harness prescribing `gdf.estimate_utm_crs()` (`InLoop = 63.3% vs OraDev = 26.7%`), causing the same second-order polar/antimeridian collapse (`ALL = 19.1%`, `Err = 54.2%`).
-- **Zero-Label Counterfactual Guidance vs. Oracle & Inference-Time Baselines**: At seed 0, `stage2_coev` (`62.9%`, `1.18` calls) outperforms both the 3-location `oracle_soft` upper bound (`55.3%`, `1.44` calls) and inference-time `runtime_meta.py` (`57.1%` at `2.61` calls, 2.2x inference cost), while zero-diagnostic `meta_gate_only` (`53.6%`, `HO = 60.7%`) nearly matches `oracle_soft`.
+- **Zero-Label Counterfactual Guidance vs. Oracle & Inference-Time Baselines**: At seed 0, `stage2_coev` (`62.9%`, `1.18` calls) outperforms both the 3-location `oracle_soft` upper bound (`55.3%`, `1.44` calls) and inference-time `runtime_meta.py` (`57.1%` at `2.61` calls, 2.2x inference cost), while zero-diagnostic `meta_gate_only` (`53.6%`, `HO = 60.7%`) nearly matches `oracle_soft`. *Correction (§2.5): seed 0 was the best seed for `naive`, `meta_gate_only` and `oracle_soft`; over 6 seeds no method beats `naive` (`arch_coev` +6.7 pp, sign-flip p = 0.22).*
 - **Archive-Preserving Co-Evolution (`arch_coev`) Resolves Verifier-Upgrade Hysteresis**: Retaining `gen_000` alongside re-scored Stage-1 ancestors (`extra_seed_harnesses` with `parent_gen=None` and fixed DGM fallback pool in `meta_rsi/archive.py`) lifted breakout rate from **3/6** (`coev_tip_only`: `62.9 / 16.7 / 44.0 / 18.7 / 34.0 / 46.2%`, SD `17.7%`) to **5/6** (`arch_coev`: `58.2 / 17.1 / 37.8 / 45.6 / 45.6 / 41.8%`, SD `13.6%`), rescuing previously trapped seeds `s3` (`18.7% → 45.6%`, `+26.9 pp`) and `s4` (`34.0% → 45.6%`, `+11.6 pp`). Across all 6 seeds, `arch_coev` leads all multi-seed methods (`41.0% ALL`, `44.0% Seen`), significantly outperforms fixed `meta_T0` (**`+17.4 ± 12.8 pp` ALL**, paired $t=3.33, p=0.0207$, 95% CI `[+8.1, +26.5]`; **`+22.0 ± 14.6 pp` HO**, $t=3.70, p=0.0140$, 95% CI `[+10.9, +31.9]`), and improves over `darwinx_soft` by `+9.1 pp` while slashing `Lucky` by `-31.2 pp` (`50.3% → 19.1%`) and lifting `CompV` **16.2×** (`1.3% → 21.1%`). On the single remaining trapped seed (`s1`, `17.1%`), `g01` recombined `estimate_utm_crs()` from `g-1` and `g02..g08` misdiagnosed the polar `RuntimeError` as an empty filtered GeoDataFrame.
 
 ### 2. Zero-Shot Real OpenStreetMap 4-City Urban Transfer (6 Seeds, `n = 24`)
@@ -231,6 +231,8 @@ Key Wave S4-2 breakthroughs:
 1. **Complete GSB v2 Two-Timescale Compounding**: `GRPO-Metamorphic` lifts single-turn bare `seed.py` from `30.7% → 56.2% (SFT-Meta) → 62.4% (+GRPO-Meta, +31.7 pp ALL, +34.0 pp HO, CompV 83.3% > Teacher 82.8%)` while `SFT-Weak` stays locked at `30.4%` (`Lucky = 48.0%`). Adding a completely domain-agnostic Gen-2 retry harness (zero GIS rules!) pushes **`grpo_meta_final` to `68.2%` ALL / `69.3%` Held-Out / `0.7%` Err** (`+5.3 pp` ALL and **`+9.3 pp` Held-Out above the multi-turn Gen-1 Teacher `62.9% / 60.0%`**!).
 2. **`+79.2 pp` Real-World OpenStreetMap Weight Separation**: With zero GIS prompt rules (`1.00` call), `SFT-Weak` collapses real 4-city OSM from `41.7% → 12.5%` (`0/6` Helsinki, `0/6` Tromsø, `70.8%` silent wrong), whereas `SFT-Meta` reaches `79.2%`, `GRPO-Meta` reaches **`91.7%` (22/24, `0.0%` Err)**, and Gen-2 Compounding hits **`100.0%` (24/24, `1.04` calls)**!
 3. **True Out-of-Distribution External Transfer (`GeoAnalystBench`)**: On completely unseen open-source `GeoAnalystBench` workflows (never seen in any training or evolution split), metamorphic weight internalization drives `dynamic_crs_vec` from **`0.0% → 71.4%`** (`+71.4 pp`), eliminates `EPSG:3857` (`5.9% → 0.0%`), and lifts `strict_geo_sound` from `76.5% → 88.2%` (`SFT-Meta`) / `82.3%` (`GRPO-Meta`) while `SFT-Weak` degrades Base 26B to `64.7%` (`-11.8 pp`, halving `raster_nodata_safe` `75.0% → 37.5%`).
+
+*Correction (§2.5):* the `SFT-Weak` vs `SFT-Meta` gap above is a teacher effect. Trained on the `stage2_coev` teacher's scripts with the weak filter, `sft_same_teacher_weak` matches `sft_meta` (Protocol A 60.2 vs 58.2%, Protocol B 50.2 vs 50.2%, 8-city OSM 96.9 vs 92.7%). A weak-reward GRPO run from the same init matches `GRPO-Meta`, and 5 SFT epochs beat it on Protocol A.
 
 ## 2.4 Metamorphic Gate False-Rejection Audit (`runs/v11_gate_precision/`, 2026-11-25)
 
@@ -284,6 +286,77 @@ One reference solution per template (local azimuthal-equidistant projection; rep
 
 Implications: the gate is a high-precision filter (97–99% of passed scripts are oracle-correct). On GSB v2 it rarely rejects a script whose answer is right for the probe's input (6 of 96 rejections). Most of what it rejects fails on inputs the oracle does not test, so the measured false-rejection rate mostly reflects the oracle's coverage. The assumption that every probe preserves the answer does fail for answers tied to absolute position (the real-OSM latitude tasks) and for probes that are not lossless: thresholded aggregates over a resampled raster, and exact topology after a reprojection round trip. Results built on the gate should report its false-rejection rate against the oracle together with this breakdown.
 
+## 2.5 Rebuttal Controls for Weight Internalization and the Completed 6-Seed Baselines (`runs/v9_rebuttal_gpu/`, 2026-11-25)
+
+All runs: `google/gemma-4-26B-A4B-it` bf16 with LoRA on Colab G4 vLLM, temperature 0, no thinking. All 52 eval JSONs have `usage.errors == 0`, `calls >= n` and per-task records. Training uses the same disjoint `train[20:60]` (600 tasks) and SFT recipe (2 epochs) as Wave S4-2 unless noted. The analysis below pairs models task by task, with 95% bootstrap intervals that resample task families.
+
+### 1. Controls
+
+| Model | Init | Training data | Size |
+|---|---|---|---|
+| `sft_same_teacher_weak` | base | `stage2_coev` teacher (the `sft_meta` teacher), weak filter (correct on `low`) | 447 (1 uses EPSG:3857) |
+| `sft_base_weak` | base | bare 26B `seed.py`, weak filter | 444 (191 use EPSG:3857) |
+| `sft_base_meta` | base | bare 26B `seed.py`, metamorphic filter | 147 (3 use EPSG:3857) |
+| `sft_meta_more` | base | the S4-2 `sft_meta` data (teacher + metamorphic filter), 5 epochs instead of 2 | 391 |
+| `grpo_weak_final` | `sft_meta` | GRPO on the `grpo_meta_final` schedule (4 rounds × 6 steps × 32 rollouts), reward = correct on `low` only | 768 rollouts (487 rewarded, 1 uses EPSG:3857) |
+
+The S4-2 models (base, `sft_weak`, `sft_meta`, `grpo_meta_final`) were evaluated again in the same session. Base, `sft_meta` and `grpo_meta_final` have 3 Protocol A repeats.
+
+### 2. Results
+
+Protocol A: one script per task, written on `low` and scored on every variant. Protocol B: the model writes a new script for each variant, and the task counts only if all of them are right.
+
+| Model | GSB v2 Protocol A | Protocol B | B held-out | B `Lucky` | OSM, 8 cities (`n=96`) | OSM, 4 cities (`n=24`) |
+|---|---:|---:|---:|---:|---:|---:|
+| Base 26B | 29.0% (27.8 / 30.0 / 29.1) | 27.3% | 25.3% | 47.6% | 54.2% | 41.7%* |
+| `sft_weak` (`darwinx_soft` teacher) | 30.4%* | 26.7% | 21.3% | 45.8% | 36.5% | 12.5%* |
+| `sft_base_weak` | 31.6% | 28.9% | 23.3% | 50.7% | 51.0% | 29.2% |
+| `sft_base_meta` | 32.4% | 30.4% | 29.3% | 48.2% | 67.7% | 54.2% |
+| `sft_meta` | 58.2% (58.7 / 59.3 / 56.7) | 50.2% | 36.7% | 14.9% | 92.7% | 79.2%* |
+| `sft_same_teacher_weak` | 60.2% | 50.2% | 44.7% | 15.6% | **96.9%** | **95.8%** |
+| `sft_meta_more` | **66.9%** | **59.3%** | **64.7%** | **8.0%** | 87.5% | 70.8% |
+| `grpo_meta_final` | 62.3% (61.6 / 64.4 / 60.9) | 56.4% | 50.0% | 12.0% | 90.6% | 91.7%* |
+| `grpo_weak_final` | 63.3% | 52.4% | 43.3% | 16.2% | 91.7% | **95.8%** |
+
+\* Earlier evaluations without per-task records (Wave S4-2; base OSM from `runs/v6_gsb_v2_s3b_stage2/`), not paired below.
+
+| Comparison (paired by task) | What it isolates | Protocol A | Protocol B | OSM, 8 cities |
+|---|---|---:|---:|---:|
+| `sft_same_teacher_weak` − `sft_meta` | filter, same teacher | +2.0 [−4.7, +8.6] | +0.0 [−7.2, +7.6] | +4.2 [+0.0, +10.4] |
+| `sft_meta` − `sft_weak` | teacher (and filter) | — | +23.6 [+6.9, +40.5] | +56.2 [+34.4, +77.1] |
+| `sft_base_meta` − `sft_base_weak` | filter, bare-model data | +0.9 [−4.7, +6.5] | +1.6 [−2.7, +6.6] | **+16.7 [+2.1, +33.3]** |
+| `sft_base_meta` − base | self-distillation | +3.5 [−0.1, +7.9] | +3.1 [−0.4, +7.5] | **+13.5 [+3.1, +25.0]** |
+| `grpo_weak_final` − `grpo_meta_final` | GRPO reward | +1.0 [−5.5, +7.3] | −4.0 [−10.4, +0.9] | +1.0 [−12.5, +15.6] |
+| `grpo_meta_final` − `sft_meta` | GRPO over its init | +4.1 [−0.2, +9.0] | +6.2 [+0.2, +12.6] | −2.1 [−16.7, +11.5] |
+| `sft_meta_more` − `sft_meta` | 5 vs 2 SFT epochs | +8.7 [+2.6, +14.9] | +9.1 [+0.7, +18.0] | −5.2 [−18.8, +3.1] |
+| `sft_meta_more` − `grpo_meta_final` | longer SFT vs GRPO | +4.6 [+0.7, +9.3] | +2.9 [−2.7, +8.3] | −3.1 [−22.9, +14.6] |
+
+Findings:
+- **The S4-2 gap between `SFT-Weak` and `SFT-Meta` comes from the teacher, not the filter.** With the same `stage2_coev` teacher, the weak filter does as well as the metamorphic one under both protocols and on both OSM sets. The two teachers differ in quality: 37% of the `darwinx_soft` teacher's kept scripts are oracle-correct (181/493, §2.4) against 89% for `stage2_coev` (400/447). The strong teacher writes almost no EPSG:3857 scripts (1/447 kept by the weak filter), so the metamorphic filter has little to remove. What the gate contributed is the teacher harness, which was evolved under it. Remaining differences: `sft_meta` was trained in the S4-2 session on 391 samples, `sft_same_teacher_weak` here on 447.
+- **On bare-model data the metamorphic filter helps on real OSM only.** On GSB v2 it is within noise (+0.9 / +1.6). On the 8-city OSM set, `sft_base_meta` beats `sft_base_weak` by 16.7 pp using a third of the data (147 vs 444 scripts), with the gains in building area (38 → 100%), large-building area (25 → 100%), road length and hull density (25 → 62%). This is the only significant effect of the filter itself in these controls.
+- **The GRPO reward does not matter from this init.** Weak reward and metamorphic reward from the same `sft_meta` end within noise on Protocol A and OSM. Protocol B leans toward the metamorphic reward (−4.0, interval includes 0). Rollouts from `sft_meta` almost never use EPSG:3857 (1/768 under the weak reward), so there is little for the metamorphic reward to block.
+- **More SFT epochs match or beat GRPO.** Five epochs on the same 391 samples beat `grpo_meta_final` on Protocol A (+4.6) and give the best Protocol B result (59.3%, held-out 64.7%). The GRPO gain over its init (+4.1 A, +6.2 B) is no larger than what longer SFT gives. On OSM neither helps; `sft_meta_more` drops on `osm_road_buffer_poi_count` (88 → 12%).
+- **Protocol B is 6–11 pp below Protocol A for every distilled model** (intervals exclude 0) and 1.6–2.7 pp below for the base-like models. Per-variant accuracy is nearly the same under both protocols (e.g. `sft_meta` high 74 / 72%, polar 69 / 68%). The gap comes from requiring every independently generated script to be right: the distilled models' errors vary from one generation to the next, while the base-like models make the same mistake on every variant (high / polar / antimeridian 26–37% in both protocols).
+- **Repeat noise at temperature 0.** Across the 3 Protocol A repeats, 4.9% (base), 13.6% (`sft_meta`) and 11.7% (`grpo_meta_final`) of tasks change outcome, and ALL moves by up to 3.5 pp. Single-run differences of a few points are within this.
+- **Regressions shared by every model distilled from the strong teacher** (`sft_meta`, `sft_same_teacher_weak`, `sft_meta_more`, both GRPO models): `large_region_area_v2` and `large_route_length_v2` are at 0% under both protocols (base 20% / 10% in A), and `large_max_geodesic_span` drops from 97% to 53–87% (A). Self-distillation goes the other way on `large_region_area_v2`: `sft_base_weak` 95%, `sft_base_meta` 55% (A). The 40-pp cost of the metamorphic filter there matches §2.4, where it kept 2 of the bare model's 25 oracle-correct scripts for that family. Three raster families (`raster_threshold_area`, `raster_slope_exceed_area`, `raster_hotspot_in_buffer`) stay at 0–7% for every model.
+- **8-city OSM** (Helsinki, Longyearbyen, Quito, Reykjavík, Singapore, Sydney, Tromsø, Wellington; 12 templates). Strong-teacher models reach 87.5–96.9% against 54.2% for base. `sft_weak` falls below base (−17.7 [−32.3, −4.2]): distilling the weak teacher hurts transfer. With the absolute tolerance (`a79afd1`), the latitude template scores 100% for every model. `osm_nearest_poi_median_dist` is the hardest template (0–88%).
+
+### 3. Completed 6-seed baselines (`runs/v9_rebuttal_gpu/missing_6seed/`)
+
+Seeds 1–5 of `naive`, `meta_gate_only` and `oracle_soft`, with the same 6-attempt search budget as seed 0, evaluated on local vLLM. Together with §2.3.1 every method now has 6 seeds:
+
+| Method | ALL (`n=450`) | Seen | Held-out | `Lucky` | `Err` | `CompV` | `Rast` | Calls | Per-seed ALL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `naive` | 34.4 ± 6.2% | 35.8 ± 6.8% | 31.4 ± 5.2% | 47.8 ± 8.7% | 3.2 ± 3.7% | 4.4 ± 9.0% | 37.6 ± 2.0% | 1.13 ± 0.15 | 46.9 / 33.3 / 31.1 / 31.3 / 31.6 / 32.0 |
+| `meta_gate_only` | 37.2 ± 8.4% | 37.9 ± 6.4% | 35.7 ± 12.8% | 39.9 ± 13.4% | 7.3 ± 6.3% | 12.3 ± 21.3% | 38.2 ± 3.8% | 1.37 ± 0.39 | 53.6 / 29.6 / 37.3 / 33.3 / 33.8 / 35.6 |
+| `oracle_soft` | 39.3 ± 10.7% | 41.3 ± 7.7% | 35.2 ± 18.2% | 33.9 ± 10.7% | 7.5 ± 2.9% | 20.1 ± 21.3% | 37.2 ± 4.2% | 1.17 ± 0.15 | 55.3 / 42.0 / 26.9 / 36.2 / 45.8 / 29.3 |
+| `arch_coev` (§2.3.1) | 41.0 ± 13.6% | 44.0 ± 12.0% | 35.0 ± 18.0% | 19.1 ± 14.5% | 25.4 ± 20.7% | 21.1 ± 19.0% | 37.1 ± 9.9% | 1.39 ± 0.27 | 58.2 / 17.1 / 37.8 / 45.6 / 45.6 / 41.8 |
+
+- **Seed 0 was the best seed** for these three methods (46.9 / 53.6 / 55.3% against seed 1–5 means of 31.9 / 33.9 / 36.0%), and it is also high for `coev_tip_only` and `arch_coev`. The seed-0 comparisons in §2.3.1 (`stage2_coev` 62.9% > `oracle_soft` 55.3% > `meta_gate_only` 53.6% > `naive` 46.9%) were made on that seed.
+- **No method beats `naive` over 6 seeds.** Seed-paired exact sign-flip test (the smallest possible p with 6 seeds is 0.031): `arch_coev` +6.7 pp (5/6 seeds, p = 0.22), `oracle_soft` +4.9 (p = 0.16), `meta_gate_only` +2.8 (5/6, p = 0.16), `llm_judge` +5.2 (p = 0.44), `coev_tip_only` +2.7 (p = 0.63). Only `meta_T0` differs (−10.8, 0/6, p = 0.031). `arch_coev` is +1.8 over `oracle_soft` (p = 0.88) and +3.8 over `meta_gate_only` (p = 0.38).
+- On seeds 1–5, `naive` stays at 31–33%, the level of `darwinx_soft` and bare `seed.py`.
+- Still confounded: `arch_coev` was evaluated on Vertex MaaS and the other methods on local vLLM, and the seed-0 evals carry no per-task records. The unified re-evaluation (`scripts/rebuttal/unified_6seed_eval.py` → `runs/v10_unified_6seed/`) reruns all 48 harnesses on one server, adds Protocol B, and scores the blind variants (`docs/BLIND_PROTOCOL.md`).
+
 ---
 
 ## 3. Open Methodological Risks & Mitigation Tracker
@@ -292,10 +365,11 @@ Implications: the gate is a high-precision filter (97–99% of passed scripts ar
 |---|---|---|---|
 | **R1** | **Target-location overlap**: `metamorphic.py` relocates local inputs to `(58.3°, 6.0°)` / `(-56.2°, 12.0°)`, overlapping GSB v1 `high`/`zone_edge`. | **Resolved via Polar OOD Protocol A/B & Self-Certified Co-Evolution (2026-11-21); GSB v2 next** | Demonstrated self-certified polar verifier discovery breaking Polar-A (`0.2% → 85.9%`) and Polar-B (`13.6% → 82.1%`) with zero polar hints or labels; expanding to polar + antimeridian + raster/OSM in GSB v2. |
 | **R2** | **Diagnostic hint leakage in v0.2**: `evaluator.py` previously appended a GIS/CRS hint string inside `meta_diag`. | **Resolved (2026-11-21)** | Verified `--minimal-meta-prompt` + anonymized `probe_1/probe_2` AND zero-diagnostic `meta_gate_only` (`80.8%`, 3/3 seeds > `darwinx_soft` `76.9%`). |
-| **R3** | **Missing baselines & seed count**: Need non-evolution baselines, Oracle/soft-DarwinX/LLM-judge controls, and ≥6–8 seeds. | **Non-evolution, soft-DarwinX & Oracle completed (2026-11-21); `llm_judge` & ≥6 seeds planned on GSB v2** | Completed `handcrafted` (`74.2%`), `runtime_meta` (`70.0%`), `darwinx_soft` ($\delta=0.14$), and `oracle`; scale full multi-seed matrix + `llm_judge` on GSB v2. |
+| **R3** | **Missing baselines & seed count**: Need non-evolution baselines, Oracle/soft-DarwinX/LLM-judge controls, and ≥6–8 seeds. | **6 seeds for all 8 GSB v2 methods (2026-11-25); not significant** | §2.5: with seeds 1–5 of `naive`, `meta_gate_only` and `oracle_soft`, no method beats `naive` (`arch_coev` +6.7 pp, 5/6 seeds, sign-flip p = 0.22). Next: the unified one-server re-evaluation (`runs/v10_unified_6seed/`) and the blind variants; more seeds if the difference is to be tested. |
 | **R4** | **Swallowed-exception degradation**: Rule-heavy prompts and OOD fallbacks silently swallow exceptions. | **Resolved & ablated (2026-11-21)** | Domain-neutral `sys.monitoring` telemetry broke 2nd-order `except RuntimeError: EPSG:3857` lock-in during polar co-evolution (`16.7% → 88.9%` in-loop). |
 | **R5** | **Bounded iteration vs true RSI**: Fixed human-written `metamorphic.py` + closed-API Meta-Agent. | **Core mechanisms verified (2026-11-21)** | Verified (a) non-circular self-certified verifier co-evolution, (b) 100% open-weight symmetric `26B → 26B` evolution, and (c) Dual-G4 Two-Timescale Harness → SFT + GRPO-Metamorphic → Gen-2 compounding (`36.5% → 93.3%`). |
 | **R6** | **Gate false rejections**: the metamorphic gate assumes every probe preserves the answer. | **Measured and traced (2026-11-25), open** | Section 2.4: the full gate rejects 5.8–20.4% of oracle-correct GSB v2 scripts, but only 6 of 96 rejections are gate errors (the probe changes the reference answer); the rest fail on answer-preserving inputs the oracle does not test (mixed CRSs, km or projected storage, polar scenes). On real OSM, correct absolute-position solutions are rejected (latitude 8/8). Next: skip relocating probes for absolute-position answers, use sum- or majority-preserving resampling for thresholded rasters, and report the breakdown next to every gate result. |
+| **R7** | **Teacher vs. filter confound in weight internalization**: `SFT-Weak` and `SFT-Meta` used different teachers. | **Measured (2026-11-25)** | §2.5: with the same teacher the filter makes no difference (Protocol A +2.0, B +0.0 pp); on bare-model data it helps only on real OSM (+16.7 pp). Weak-reward GRPO matches metamorphic-reward GRPO. Claims about the metamorphic signal in weights should rest on the self-distillation result, not on `SFT-Weak` vs `SFT-Meta`. |
 
 ---
 
@@ -330,4 +404,5 @@ Implications: the gate is a high-precision filter (97–99% of passed scripts ar
 - `runs/v5_two_timescale/`: Complete A3 Dual-G4 26B Two-Timescale RSI artifacts — disjoint `train[20:55]` trajectories, `sft_weak` / `sft_meta` / `grpo_meta_final` summaries & full `eval480` JSONs, Gen-2 archive & `gen2_best_harness.py`, and trained bf16 LoRA checkpoint (`lora_grpo_meta_final/`, all 4 eval JSONs `usage.errors == 0`).
 - `runs/v6_gsb_v2_s3/`, `runs/v6_gsb_v2_s3b/`, `runs/v6_gsb_v2_s3b_stage2/`: GSB v2 single-seed 4-tier ladder, 3 certified probes, and live OSM baseline evaluations.
 - `runs/v7_s4_wave1{a,b,c}_g4{a,b}/`, `runs/figures/`: Complete audited Sprint 4 Wave 1A/1B/1C 6-seed GSB v2, 6-seed OSM, 3-seed `SciUnits` (symmetric + `gem4h`), and regenerated publication tables & SVG figures (`summary_tables.md`, `summary_data.json`, `fig_gsb2_multiseed.svg`, `fig_gsb2_two_timescale.svg`).
+- `runs/v9_rebuttal_gpu/`: rebuttal controls (§2.5): trajectories and summaries for `same_teacher_weak` / `base_weak` / `base_meta`, LoRA configs for the 5 new adapters, Protocol A (with `.code.jsonl` scripts) and Protocol B GSB v2 evals, 8-city and 4-city OSM evals, and `missing_6seed/` (seeds 1–5 of `naive`, `meta_gate_only`, `oracle_soft`: archives, best harnesses, evals); all 52 eval JSONs `usage.errors == 0` with per-task records.
 - `runs/v8_s4_wave2_v2/`: Complete Sprint 4 Wave S4-2 GSB v2 Two-Timescale RSI artifacts — disjoint `train[20:60]` `weak`/`meta` trajectories, bf16 LoRA checkpoints (`sft_weak/`, `sft_meta/`, `grpo_meta_final/`), 24-step GRPO summary, bare-`seed.py` & Gen-2 compounding `eval450` + real OSM JSONs, and 4-weight `GeoAnalystBench` (`4096` tok) audit JSONs (all 71 Sprint 4 JSONs strictly audited `usage.errors == 0` & `calls >= n`).
