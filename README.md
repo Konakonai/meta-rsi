@@ -58,6 +58,12 @@ Single complete closed-loop run using zero closed APIs, zero 3-location oracle l
 *(Under symmetric open-weight harness evolution on 26B-A4B, weak `darwinx_soft` degraded `2/2` seeds to `20.0% / 20.4%` by writing `EPSG:3857` into its own prompt; `meta_neutral` teacher seed 1 reached `86.2%`, while seed 0 reached `42.7%`.)*
 
 ### 3. Multi-Modal `GSB v2` (6 Seeds, `n=450`), Real OSM Transfer (`n=24`), `SciUnits` & `GeoAnalystBench`
+
+> **Corrections (2026-11-25, [RESEARCH.md §2.5](docs/RESEARCH.md)).** Two claims below do not survive the rebuttal controls.
+> 1. **`SFT-Weak` vs `SFT-Meta` is a teacher effect, not a filter effect.** The two used different teachers. With the same teacher, weak filtering matches metamorphic filtering (Protocol A 60.2 vs 58.2%, Protocol B 50.2 vs 50.2%). Weak-reward GRPO also matches metamorphic-reward GRPO.
+> 2. **Over 6 seeds, no method significantly beats `naive`.** With seeds 1–5 of `naive`, `meta_gate_only` and `oracle_soft` added, `arch_coev` leads `naive` by +6.7 pp (5/6 seeds, sign-flip p = 0.22). The single-seed comparisons came from seed 0, the best seed for those baselines.
+>
+> A one-server re-evaluation of all 48 harnesses is running, with its analysis pre-registered in [docs/BLIND_PROTOCOL.md](docs/BLIND_PROTOCOL.md). This section will be rewritten from its results.
 - **6-seed `GSB v2` matrix** (1,950 polar/antimeridian/GeoTIFF raster tasks, symmetric `26B-A4B`):
   - Base `seed.py`: `30.7%` (`44.4%` lucky); static `handcrafted.py`: `35.1%` (`49.6%` error); inference-time `runtime_meta.py`: `57.1%` (`2.61` calls); `oracle_soft` (s0): `55.3%`.
   - `darwinx_soft` (weak `dev_low`, 6 seeds): **`31.9 ± 1.2%`** (`50.3 ± 3.6%` lucky, `CompV 1.3%`) — **6/6 locked in**.
