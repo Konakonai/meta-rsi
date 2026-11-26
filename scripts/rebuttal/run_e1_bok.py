@@ -45,8 +45,6 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from scripts.wave_s4_2.run_single_g4_wave2 import _run_colab, upload_chunked  # noqa: E402
-
 MODEL_ID = "google/gemma-4-26B-A4B-it"
 DEFAULT_OUT_DIR = REPO / "runs/v12_e1_bok"
 
@@ -498,6 +496,7 @@ def main() -> None:
         return
     if not a.session:
         raise SystemExit("Pass --session <colab-session> (ONLY after unified_6seed_eval & Amendment 2!) or --dry-run-cpu")
+    from scripts.wave_s4_2.run_single_g4_wave2 import _run_colab, upload_chunked
 
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
