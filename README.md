@@ -10,7 +10,7 @@ A geospatial script can run cleanly, pass a local check, and still be wrong some
 - weight-level distillation (SFT, GRPO);
 - the pre-registered analyses used to evaluate all of it.
 
-## Status (2026-11-26)
+## Status (2026-11-27)
 
 The current evidence, from pre-registered analyses on a one-server re-evaluation of 48 evolved harnesses (8 methods × 6 seeds):
 
@@ -151,7 +151,10 @@ Values are the share of variants answered correctly.
 
 - **The data-link test is positive.** In the candidate pool, scripts that pass the gate are 26.4 pp more often oracle-correct than scripts that pass only the weak check (11 families, p = 0.031). The training scripts are 90% against 81% oracle-correct.
 - **Cleaner data did not give a better model.** The pre-registered Reading 2 holds, so the claim that metamorphic filtering improves training data beyond the weak check is dropped for GSB v2.
-- **The test is weak.** 82% of the 237 tasks come from 5 easy families where both arms pick the same script, and the arms differ on only 15–19% of tasks.
+- **The test is weak.**
+  - 82% of the 237 tasks come from 5 easy families where both arms pick the same script, and the arms differ on only 15–19% of tasks.
+  - Training is 30 optimizer steps. It changes the outcome on about 5% of test tasks relative to the bare model.
+  - Building the 237-task set already uses the gate. That removes, from both arms, the 316 tasks whose only weak-passing scripts are shortcuts (2.9% oracle-correct). So E1 tests how the gate ranks candidates within a task, not its task-level filtering.
 
 ## How the evidence was produced
 

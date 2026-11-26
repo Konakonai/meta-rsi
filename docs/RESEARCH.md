@@ -2,7 +2,7 @@
 
 > Living master document for the `meta-rsi` research project, undergraduate thesis, and SCI / top-venue manuscript.
 > Repository: `https://github.com/Konakonai/meta-rsi`
-> Last updated: 2026-11-26.
+> Last updated: 2026-11-27.
 > Related long-term docs: [LITERATURE.md](LITERATURE.md) · [GSB_V1_BASELINE.md](GSB_V1_BASELINE.md) · [INFRA_AND_GOTCHAS.md](INFRA_AND_GOTCHAS.md)
 
 ---
@@ -506,7 +506,10 @@ Share of scored variants correct:
   - Per mechanism, `arch_coev − naive` goes in opposite directions:
     - `us_ft` +10.9 [+1.5, +20.3] (6/6 seeds, p = 0.031, descriptive). The km-units probe exercises reading a CRS's linear unit, and that carries over from kilometres to US survey feet.
     - `albers` −1.8. Local Albers is an equal-area projection in metres, so a script that ignores the CRS and takes planar `.area` in native coordinates gets area tasks right. That is why `naive` (72.4%) and `darwinx_soft` (75.5%) score high there.
-    - `nodata_nan` +1.1. Of `arch_coev` seed 0's 90 scripts that are right on `low`, 33 fail `nodata_nan`: 19 return NaN and 14 return 0.0. A text search does not explain why; all 33 also call `isnan` or `isfinite` somewhere.
+    - `nodata_nan` +1.1. Of `arch_coev` seed 0's 90 scripts that are right on `low`, 33 fail `nodata_nan`: 19 return NaN and 14 return 0.0. All 33 call `isnan` or `isfinite` somewhere, but not on the path that runs.
+      - Example (traced by the reviewer, rechecked): the script for `raster_zonal_mean-test-0000` filters with `data[data != nodata]` whenever `nodata is not None`, and uses `np.isfinite` only in the `else` branch.
+      - With NaN as the declared nodata, the first branch runs. `NaN != NaN` keeps every padded cell, and the mean becomes NaN.
+      - The probes only ever swap one finite nodata sentinel for another, so they cannot exercise this branch.
   - On `csv_lon360`, every gated or judged method is below `naive`: `arch_coev` −9.1 [−34.0, +15.9], `llm_judge` −22.4.
   - Over all held-out variants, `llm_judge` is the only method whose interval excludes 0: −11.3 [−19.1, −3.4].
   - `nodata_nan` is the hardest mechanism for every method (38–45%).
@@ -554,7 +557,12 @@ Share of scored variants correct:
 
 **Data link (pre-registered attribution test).** Per task in T, the oracle-correct share of the candidates that pass the gate minus that of the candidates that pass the weak check, averaged within family: **+26.4 pp over 11 families, exact sign-flip p = 0.031**. The gate-filtered pool is cleaner.
 - The gain sits in `large_route_length_v2` (+87.9), `area_weighted_pop_filter` (+58.1), `multi_ring_density` (+49.9), `buffer_exclusion_area` (+42.7), `raster_buffer_extract` (+30.8) and `nearest_service_gap` (+21.2).
-- It is 0 in the 5 families that dominate T, where the weak check already selects correct scripts.
+- It is 0 in 4 of the 5 families that dominate T, and −0.2 pp in `large_region_area_v2`. In those families the weak check already selects correct scripts.
+- **Sensitivity to the family weighting** (the statistic is pre-registered; this check was raised by the reviewer and rechecked).
+  - Each of the 11 families counts equally, so the 6 sparse families (43 of the 237 tasks, 2–14 tasks each) carry 55% of the weight.
+  - Weighted by task, pool precision rises from 81.2% to 90.3%, a gain of +9.0 pp. That equals the gap between the two arms' training scripts.
+  - Dropping the two families with fewer than 5 tasks (`nearest_service_gap` 2, `area_weighted_pop_filter` 3) gives +23.4 pp (p = 0.125). Keeping only the 7 families with ≥ 10 tasks gives +13.2 pp (p = 0.50).
+  - The direction holds under each weighting; the size and the p-value do not.
 
 **Results.**
 
@@ -573,11 +581,18 @@ Silent and loud failures, Protocol A (meta / weak / bare): silent 62.1 / 62.9 / 
   - The arms differ on 15–19% of tasks.
 
   E1 therefore shows that the filter adds nothing here. It cannot show whether the filter would add value with more data, or with data where the weak check and the gate disagree more often.
+- **What E1 isolates (raised by the reviewer, rechecked).** Building T already uses the gate at the task level, and both arms are restricted to T.
+  - The bare model has a weak-passing candidate on 553 of the 600 tasks, but those candidates are oracle-correct only 36.5% of the time (task average).
+  - On the 316 tasks where some candidate passes the weak check and none passes the gate, the weak-passing candidates are 2.9% oracle-correct, and about 70% of them use EPSG:3857.
+  - Restricting to T removes these shortcut-only tasks from `bok_weak` as well. Its training scripts are therefore 81% oracle-correct, and 15% use EPSG:3857 (35/237 in replicate 0), against 43% (191/444) for §2.5's `sft_base_weak`.
+
+  E1 therefore tests how the gate ranks candidates within tasks the model can sometimes solve cleanly. §2.5 tested task-level rejection and candidate filtering together, on different task sets (`sft_base_meta` 147 tasks, `sft_base_weak` 444). Neither improves GSB v2: +0.9 pp in §2.5, −0.0 pp here.
+- **How little the distillation moves the model.** Training is 237 samples × 2 epochs, 30 optimizer steps. Against the bare model on the same server, the LoRAs change the Protocol A outcome on 5.5% (`bok_meta`) and 4.7% (`bok_weak`) of test tasks. §2.5 measured 4.9% for two temperature-0 repeats of the bare model.
 - **On OSM, descriptively, `bok_meta` is ahead.**
   - The difference is +5.4 pp (4/6 replicates, p = 0.16), and `bok_meta` has 7.5 pp fewer silent failures than `bok_weak`.
   - `bok_weak` sits at the bare model's level.
-  - The direction matches §2.5 (`sft_base_meta − sft_base_weak` +16.7 pp on the same OSM set), but the effect is smaller and not established.
-- **Against §2.5** (descriptive, different server): the E1 arms (31.6%) sit where `sft_base_weak` (31.6%) and `sft_base_meta` (32.4%) did on Protocol A.
+  - The direction matches §2.5 (`sft_base_meta − sft_base_weak` +16.7 pp on the same OSM set), but the effect is smaller and not established. Part of the shrinkage comes from the T restriction: in §2.5 `sft_base_weak` fell below the bare model on OSM (51.0% against 54.2%), while here `bok_weak` does not (56.6% against 57.3%).
+- **Against §2.5** (descriptive, different server): the E1 arms (31.6%) sit where `sft_base_weak` (31.6%) and `sft_base_meta` (32.4%) did on Protocol A. The bare model itself scores higher on the A100 than on the G4 (30.9% against 29.0% on Protocol A, 57.3% against 54.2% on OSM), which is why E1 evaluates it on the same server. Against that same-server baseline the E1 arms gain about +0.7 pp; in §2.5 `sft_base_meta` gained +3.5 pp [−0.1, +7.9] over its bare model.
 
 ---
 
@@ -627,4 +642,7 @@ Silent and loud failures, Protocol A (meta / weak / bare): silent 62.1 / 62.9 / 
 - `runs/v6_gsb_v2_s3/`, `runs/v6_gsb_v2_s3b/`, `runs/v6_gsb_v2_s3b_stage2/`: GSB v2 single-seed 4-tier ladder, 3 certified probes, and live OSM baseline evaluations.
 - `runs/v7_s4_wave1{a,b,c}_g4{a,b}/`, `runs/figures/`: Complete audited Sprint 4 Wave 1A/1B/1C 6-seed GSB v2, 6-seed OSM, 3-seed `SciUnits` (symmetric + `gem4h`), and regenerated publication tables & SVG figures (`summary_tables.md`, `summary_data.json`, `fig_gsb2_multiseed.svg`, `fig_gsb2_two_timescale.svg`).
 - `runs/v9_rebuttal_gpu/`: rebuttal controls (§2.5): trajectories and summaries for `same_teacher_weak` / `base_weak` / `base_meta`, LoRA configs for the 5 new adapters, Protocol A (with `.code.jsonl` scripts) and Protocol B GSB v2 evals, 8-city and 4-city OSM evals, and `missing_6seed/` (seeds 1–5 of `naive`, `meta_gate_only`, `oracle_soft`: archives, best harnesses, evals); all 52 eval JSONs `usage.errors == 0` with per-task records.
+- `runs/v10_unified_6seed/`: the unified one-server re-evaluation (§2.6). `harnesses/` (48), `manifest.json`, and `evals/`: 144 eval JSONs (48 × `A_rep1` / `A_rep2` / `B_rep1`), the Protocol A `.code.jsonl` scripts, and 96 `.blind.json` and 96 `.heldout.json` sidecars. Summaries: `unified_summary_ref_{naive,arch_coev}`, `blind_summary` and `heldout_summary` (`.md` / `.json`).
+- `runs/v11_gate_precision/`: gate-vs-oracle audits (§2.4): `gate_vs_oracle_*.jsonl` per trajectory source, the reruns with the E1 probes at 2% and 1% tolerance (`*_e1*`), `false_rejection_causes*`, and the OSM reference check.
+- `runs/v12_e1_bok/`: E1 (§2.7). `e1_scored_candidates.jsonl` (600 tasks × 16 candidates), `arms/` (12 arm files and `e1_selection_audit.json`), 12 LoRA directories with training summaries, `evals/` (39 evals with `.code.jsonl`), and `e1_summary.{md,json}`.
 - `runs/v8_s4_wave2_v2/`: Complete Sprint 4 Wave S4-2 GSB v2 Two-Timescale RSI artifacts — disjoint `train[20:60]` `weak`/`meta` trajectories, bf16 LoRA checkpoints (`sft_weak/`, `sft_meta/`, `grpo_meta_final/`), 24-step GRPO summary, bare-`seed.py` & Gen-2 compounding `eval450` + real OSM JSONs, and 4-weight `GeoAnalystBench` (`4096` tok) audit JSONs (all 71 Sprint 4 JSONs strictly audited `usage.errors == 0` & `calls >= n`).
