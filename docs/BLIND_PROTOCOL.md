@@ -131,3 +131,29 @@ The reviewer's second round (`runs/agent_mail/carbon_reply_1.md`) found that the
 - **Name.** The stratum is renamed `all_areaw`. `all_cosw` is no longer reported.
 - **A related fix.** The per-task share divided by max(weight sum, 1). That is harmless for counts but wrong for fractional weights. It now divides by the weight sum itself.
 - No blind summary had been computed when this was fixed, so no reported number changes.
+
+## Addendum 4: one scoring environment and a timeout retry (2026-11-26, 12:55 CST, before any summary)
+
+All 144 unified evals are in (48 × `A_rep1`, `A_rep2`, `B_rep1`, all clean). No unified, blind or held-out summary has been computed. The only numbers read are the per-record agreement counts below, which compare environments, not methods.
+
+**Why.** The blind (`.blind.json`) and held-out (`.heldout.json`) sidecars come from running each harness's saved code on the variant workspaces in a sandbox, so they depend on the scoring machine. Local scoring stopped at 73/96 and 68/96 because the workstation was overloaded, and the rest was to run on Colab CPU hosts. Most of what was left was `arch_coev`'s second repeat. Mixing environments would then partly confound environment with method, and the E2 confirmatory comparison is `arch_coev − naive`.
+
+**Cross-check.** Five files already scored locally were re-scored on a Colab host: `naive_s0_A_rep1`, `arch_coev_s0_A_rep1`, `naive_s1_A_rep2`, `oracle_soft_s1_A_rep2` and `meta_gate_only_s2_A_rep1`. Data were identical: both `tasks.jsonl` files and both variant trees have the same sha256 (`runs/agent_mail/data_hashes.txt`). The `correct` field disagreed on 38 of 26,290 (task, variant) pairs (0.14%; `runs/agent_mail/crosscheck_report.json`):
+- 31: local `exception`, Colab `ok` and correct. These are 2 tasks of `meta_gate_only_s2` and 1 of `arch_coev_s0`.
+- 6: local `ok` and correct, Colab `timeout` (1 task of `arch_coev_s0`, 25 s limit).
+- 1: a numeric difference across the tolerance (0.4972 vs 0.5025).
+- The other three files agreed exactly.
+
+Library versions differ:
+
+| Environment | Python | rasterio | GDAL | pyproj | PROJ | geopandas | numpy |
+|---|---|---|---|---|---|---|---|
+| Local NixOS | 3.14 | 1.5.1 | 3.13.3 | 3.8.0 | 9.9.0 | 1.2.0 | 2.5.4 |
+| Colab | 3.13.18 | 1.5.2 | 3.12.2 | 3.8.0 | 9.8.1 | 1.2.0 | 2.4.6 |
+
+The Colab host also has shapely 2.2.0 and scipy 1.16.3.
+
+**Rule.**
+1. **One environment.** All 96 `.blind.json` and 96 `.heldout.json` files are re-scored from scratch on Colab hosts with the library versions above. If the work is split across hosts, each host's versions and data hashes are checked first. The local sidecars are archived and enter no analysis.
+2. **Timeout retry.** Wall-clock limits depend on host speed and load, which is why the 6 Colab timeouts above appeared. After the first pass, every (task, variant) whose status is `timeout` is run exactly once more, with `score_blind.py score --retry-timeouts` at no more than 4 workers and the same 25 s limit. The second result stands even if it times out again, and the record is marked `retried`. This applies to every method alike. The number of timeouts before and after the retry is reported per method.
+3. **Main evals unchanged.** The Protocol A/B scores in the main eval files came from the eval server itself and are not re-scored.

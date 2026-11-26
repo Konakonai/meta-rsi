@@ -121,6 +121,14 @@ def cmd_score(a: argparse.Namespace) -> None:
         done: dict[str, dict] = {}
         if dst.exists():
             done = {rec["task_id"]: rec["variants"] for rec in json.loads(dst.read_text()).get("records", [])}
+        retried: set[tuple[str, str]] = set()
+        if getattr(a, "retry_timeouts", False):
+            # second pass (docs/BLIND_PROTOCOL.md, Addendum 4): every `timeout` from the first pass is run once more,
+            # with the same time limit at low concurrency, and that result stands even if it times out again
+            for tid, vs in done.items():
+                for vn in [vn for vn, x in vs.items() if x.get("status") == "timeout" and not x.get("retried")]:
+                    retried.add((tid, vn))
+                    del vs[vn]
         jobs = [(r, vn) for r in rows if r["task_id"] in blind and r.get("code")
                 for vn, v in blind[r["task_id"]]["variants"].items() if v["scored"] and vn not in done.get(r["task_id"], {})]
         missing_nocode = any(r["task_id"] in blind and not r.get("code")
@@ -135,6 +143,8 @@ def cmd_score(a: argparse.Namespace) -> None:
         for tid, vs in done.items():
             by_task[tid].update(vs)
         for (r, vn), x in zip(jobs, res):
+            if (r["task_id"], vn) in retried:
+                x = {**x, "retried": True}
             by_task[r["task_id"]][vn] = x
         recs = []
         for r in rows:
@@ -425,6 +435,9 @@ def main() -> None:
     s.add_argument("--timeout", type=float, default=25.0)
     s.add_argument("--suffix", default="", help="Output suffix (default: .heldout.json for the E2 set, else .blind.json)")
     s.add_argument("--prioritize", default="", help="Comma-separated method prefixes to score first (e.g. naive,arch_coev)")
+    s.add_argument("--retry-timeouts", action="store_true",
+                   help="re-run, once, every (task, variant) whose stored status is `timeout` (Addendum 4); "
+                        "run as a second pass with low --workers")
     m = sub.add_parser("summary")
     m.add_argument("--refs", default="naive,arch_coev")
     m.add_argument("--n-boot", type=int, default=4000)

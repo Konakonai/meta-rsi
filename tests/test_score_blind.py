@@ -174,3 +174,33 @@ def test_score_is_incremental_when_a_mechanism_is_added(tmp_path, monkeypatch):
     calls.clear()
     score_blind.cmd_score(argparse.Namespace(out=str(out), blind=str(root), workers=2, timeout=5.0, suffix="", prioritize=""))
     assert calls == []
+
+
+def test_retry_timeouts_reruns_each_timeout_once(tmp_path, monkeypatch):
+    """Addendum 4: a second pass re-runs stored timeouts once; the retry stands, and a third pass changes nothing."""
+    import argparse
+    root, out = tmp_path / "v2_heldout_mech", tmp_path / "out"
+    (out / "evals").mkdir(parents=True)
+    root.mkdir()
+    v = lambda m: {"dir": f"t0/{m}", "lat": 1.0, "lon": 2.0, "mechanism": m, "transfer": "near", "truth": 1.0, "scored": True}
+    task = {"task_id": "t0", "family": "f", "answer": "real", "large": False,
+            "variants": {"us_ft": v("us_ft"), "albers": v("albers")}}
+    (root / "tasks.jsonl").write_text(json.dumps(task) + "\n")
+    (out / "manifest.json").write_text(json.dumps({"entries": [{"tag": "naive_s0", "method": "naive", "seed": 0}]}))
+    (out / "evals" / "naive_s0_A_rep1.code.jsonl").write_text(json.dumps({"task_id": "t0", "code": "print(1)"}) + "\n")
+    kept = {"status": "ok", "value": 2.0, "correct": False}
+    (out / "evals" / "naive_s0_A_rep1.heldout.json").write_text(json.dumps({"records": [{"task_id": "t0", "family": "f",
+        "variants": {"us_ft": kept, "albers": {"status": "timeout", "value": None, "correct": False}}}]}))
+    calls = []
+    ns = lambda retry: argparse.Namespace(out=str(out), blind=str(root), workers=1, timeout=5.0, suffix="",
+                                          prioritize="", retry_timeouts=retry)
+    monkeypatch.setattr(score_blind, "run_variant", lambda code, d, timeout: calls.append(d.name) or {"status": "timeout"})
+    score_blind.cmd_score(ns(False))
+    assert calls == []  # a plain incremental pass keeps the stored timeout
+    score_blind.cmd_score(ns(True))
+    assert calls == ["albers"]
+    rec = json.loads((out / "evals" / "naive_s0_A_rep1.heldout.json").read_text())["records"][0]["variants"]
+    assert rec["us_ft"] == kept and rec["albers"]["status"] == "timeout" and rec["albers"]["retried"] is True
+    calls.clear()
+    score_blind.cmd_score(ns(True))
+    assert calls == []  # only one retry per (task, variant)
