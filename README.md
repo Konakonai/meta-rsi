@@ -62,18 +62,18 @@ Single complete closed-loop run using zero closed APIs, zero 3-location oracle l
 
 ### 3. Multi-Modal `GSB v2` (6 Seeds, `n=450`), Real OSM Transfer (`n=24`), `SciUnits` & `GeoAnalystBench`
 
-> **Corrections (2026-11-25, [RESEARCH.md §2.5](docs/RESEARCH.md)).** Two claims below do not survive the rebuttal controls.
+> **Corrections (2026-11-25 and 2026-11-26, [RESEARCH.md §2.5–2.6](docs/RESEARCH.md)).** Claims below that do not survive the rebuttal controls and the unified re-evaluation:
 > 1. **`SFT-Weak` vs `SFT-Meta` is a teacher effect, not a filter effect.** The two used different teachers. With the same teacher, weak filtering matches metamorphic filtering (Protocol A 60.2 vs 58.2%, Protocol B 50.2 vs 50.2%). Weak-reward GRPO also matches metamorphic-reward GRPO.
 > 2. **Over 6 seeds, no method significantly beats `naive`.** With seeds 1–5 of `naive`, `meta_gate_only` and `oracle_soft` added, `arch_coev` leads `naive` by +6.7 pp (5/6 seeds, sign-flip p = 0.22). The single-seed comparisons came from seed 0, the best seed for those baselines.
 >
-> A one-server re-evaluation of all 48 harnesses is running, with its analysis pre-registered in [docs/BLIND_PROTOCOL.md](docs/BLIND_PROTOCOL.md). This section will be rewritten from its results.
+> 3. **The unified one-server re-evaluation (2026-11-26, [RESEARCH.md §2.6](docs/RESEARCH.md), pre-registered in [docs/BLIND_PROTOCOL.md](docs/BLIND_PROTOCOL.md)) replaces the 6-seed numbers below.** Confirmatory `arch_coev − naive` = +6.7 pp (5/6 seeds, sign-flip p = 0.25): not established. The `meta_T0` comparison below came from a paired t-test and is descriptive. On blind relocated positions, the two co-evolution methods gain +19 to +22 pp per variant (6/6 seeds, descriptive) at 14 vs 6 search generations. The gain shrinks beyond the UTM limits and does not appear on held-out storage mechanisms.
 - **6-seed `GSB v2` matrix** (1,950 polar/antimeridian/GeoTIFF raster tasks, symmetric `26B-A4B`):
   - Base `seed.py`: `30.7%` (`44.4%` lucky); static `handcrafted.py`: `35.1%` (`49.6%` error); inference-time `runtime_meta.py`: `57.1%` (`2.61` calls); `oracle_soft` (s0): `55.3%`.
   - `darwinx_soft` (weak `dev_low`, 6 seeds): **`31.9 ± 1.2%`** (`50.3 ± 3.6%` lucky, `CompV 1.3%`) — **6/6 locked in**.
   - `meta_T0` (fixed mid-latitude probe, 6 seeds): **`23.6 ± 5.2%`** (`41.2 ± 25.3%` error, `CompV 0.7%`) — **6/6 second-order UTM lock-in** at poles/antimeridian.
   - `llm_judge` (static rubric, 6 seeds): **`39.5 ± 14.4%`** (`19.1%–56.2%`).
   - `coev_tip_only` (Stage-2 from Stage-1 tip alone, 6 seeds): **`37.1 ± 17.7%`** (`3/6` breakout; verifier-upgrade hysteresis on `s1, s3, s4`).
-  - **`arch_coev` (Archive-Preserving Co-Evolution, Ours, 6 seeds)**: **`41.0 ± 13.6%` ALL / `44.0 ± 12.0%` Seen / `35.0 ± 18.0%` HO** (`5/6` breakout: `58.2 / 17.1 / 37.8 / 45.6 / 45.6 / 41.8%`) — leads all 6-seed methods, significantly beats fixed `meta_T0` (**`+17.4 pp` ALL, $p=0.0207$**; **`+22.0 pp` HO, $p=0.0140$**), slashes `Lucky` vs `darwinx_soft` by `-31.2 pp` (`50.3% → 19.1%`), and lifts `CompV` **16.2×** (`1.3% → 21.1%`).
+  - **`arch_coev` (Archive-Preserving Co-Evolution, Ours, 6 seeds)**: **`41.0 ± 13.6%` ALL / `44.0 ± 12.0%` Seen / `35.0 ± 18.0%` HO** (`5/6` breakout: `58.2 / 17.1 / 37.8 / 45.6 / 45.6 / 41.8%`) — leads all 6-seed methods and beats fixed `meta_T0` (`+17.4 pp` ALL by paired t-test; descriptive under the unified analysis, +17.2 pp, sign-flip p = 0.062), slashes `Lucky` vs `darwinx_soft` by `-31.2 pp` (`50.3% → 19.1%`), and lifts `CompV` **16.2×** (`1.3% → 21.1%`).
 - **Zero-shot real OpenStreetMap 4-city transfer** (`data/osm_eval/`, 24 tasks across Singapore `1.29°N`, Xuzhou `34.26°N`, Helsinki `60.17°N`, Tromsø `69.65°N`): `seed.py` `41.7%` → weak `darwinx_soft` **`29.2%`** (`70.8%` silent wrong) → 6-seed `arch_coev` **`86.1 ± 26.2%`** (`0.0%` error, **5/6 seeds at `91.7%–100.0%`**; seed-0 `stage2_coev` `100.0%`).
 - **GSB v2 Two-Timescale Weight Internalization & Gen-2 Compounding (`runs/v8_s4_wave2_v2/`, `train[20:60]`, 100% open-weight `26B-A4B`)**:
   - `SFT-Weak` (bare `seed.py`, 1.00 call): **`30.4%`** GSB v2 (`Lucky 48.0%`, `CompV 1.1%`) / **`12.5%`** real OSM (`0/12` Helsinki/Tromsø, `70.8%` silent wrong).

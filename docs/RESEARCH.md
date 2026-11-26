@@ -392,18 +392,18 @@ Outputs are `runs/v10_unified_6seed/{unified_summary_ref_*,blind_summary,heldout
 
 ### 1. Main result: Protocol A, a task counts only if one script is right on every variant
 
-| Method | Search generations | Calls / task | `correct` | `lucky` | `silent_wrong` | `error` | − `naive` (pp) [t₅ 95%] | sign-flip p |
-|---|---:|---:|---:|---:|---:|---:|---|---:|
-| `naive` | 6 | 1.12 | 33.8 ± 5.6% | 48.5% | 14.6% | 3.0% | — | — |
-| `darwinx_soft` | 6 | 1.11 | 31.2 ± 1.4% | 51.9% | 12.0% | 4.9% | −2.6 [−8.5, +3.2] | 0.31 |
-| `meta_T0` | 6 | 1.22 | 23.3 ± 5.4% | 18.1% | 17.3% | 41.3% | −10.5 [−19.5, −1.5] | 0.062 |
-| `meta_gate_only` | 6 | 1.38 | 36.6 ± 7.7% | 40.5% | 15.1% | 7.7% | +2.8 [−0.7, +6.3] | 0.12 |
-| `coev_tip_only` | 14 | 1.31 | 37.5 ± 18.1% | 14.1% | 21.2% | 27.1% | +3.7 [−11.8, +19.2] | 0.53 |
-| `oracle_soft` | 6 | 1.19 | 39.4 ± 10.7% | 34.1% | 19.0% | 7.5% | +5.6 [−2.2, +13.4] | 0.16 |
-| `llm_judge` | 6 | 1.30 | 39.9 ± 15.0% | 20.9% | 21.7% | 17.4% | +6.1 [−12.1, +24.3] | 0.38 |
-| **`arch_coev` (confirmatory)** | 14 | 1.40 | 40.5 ± 13.3% | 19.6% | 14.5% | 25.4% | **+6.7 [−5.0, +18.3]** | **0.25** |
+| Method | Search generations | Calls / task | `correct` | `lucky` | `silent_wrong` | `error` | − `naive` (pp) [t₅ 95%] | t₅ Bonferroni/14 | sign-flip p | Holm p |
+|---|---:|---:|---:|---:|---:|---:|---|---|---:|---:|
+| `naive` | 6 | 1.12 | 33.8 ± 5.6% | 48.5% | 14.6% | 3.0% | — | — | — | — |
+| `darwinx_soft` | 6 | 1.11 | 31.2 ± 1.4% | 51.9% | 12.0% | 4.9% | −2.6 [−8.5, +3.2] | [−14.4, +9.1] | 0.31 | 1.00 |
+| `meta_T0` | 6 | 1.22 | 23.3 ± 5.4% | 18.1% | 17.3% | 41.3% | −10.5 [−19.5, −1.5] | [−28.6, +7.6] | 0.062 | 0.44 |
+| `meta_gate_only` | 6 | 1.38 | 36.6 ± 7.7% | 40.5% | 15.1% | 7.7% | +2.8 [−0.7, +6.3] | [−4.3, +9.9] | 0.12 | 0.75 |
+| `coev_tip_only` | 14 | 1.31 | 37.5 ± 18.1% | 14.1% | 21.2% | 27.1% | +3.7 [−11.8, +19.2] | [−27.4, +34.8] | 0.53 | 1.00 |
+| `oracle_soft` | 6 | 1.19 | 39.4 ± 10.7% | 34.1% | 19.0% | 7.5% | +5.6 [−2.2, +13.4] | [−10.1, +21.4] | 0.16 | 0.78 |
+| `llm_judge` | 6 | 1.30 | 39.9 ± 15.0% | 20.9% | 21.7% | 17.4% | +6.1 [−12.1, +24.3] | [−30.4, +42.6] | 0.38 | 1.00 |
+| **`arch_coev` (confirmatory)** | 14 | 1.40 | 40.5 ± 13.3% | 19.6% | 14.5% | 25.4% | **+6.7 [−5.0, +18.3]** | [−16.8, +30.1] | **0.25** | 1.00 |
 
-Mean ± sd over 6 seeds, each seed averaged over its 2 repeats. Search generations count candidate generations: `arch_coev` and `coev_tip_only` run 8 Stage-2 generations on a 6-generation Stage-1 archive. The 3 probes used by `meta_gate_only`, `coev_tip_only` and `arch_coev` were certified once, by `gemini-4-hydrogen`, and reused for every seed.
+Mean ± sd over 6 seeds, each seed averaged over its 2 repeats. `lucky` = right on some but not all variants, `silent_wrong` = wrong on all, `error` = crashed or no code. Holm p is adjusted across the 7 methods compared with `naive`; with 6 seeds no Holm p can fall below 0.05. Search generations count candidate generations: `arch_coev` and `coev_tip_only` run 8 Stage-2 generations on a 6-generation Stage-1 archive. The 3 probes used by `meta_gate_only`, `coev_tip_only` and `arch_coev` were certified once, by `gemini-4-hydrogen`, and reused for every seed.
 
 - **The confirmatory comparison is not established.**
   - `arch_coev − naive` = +6.7 pp. Per seed: +13.1 / −15.1 / +6.1 / +13.4 / +13.9 / +8.6. Sign-flip p = 0.25.
@@ -424,10 +424,15 @@ Mean ± sd over 6 seeds, each seed averaged over its 2 repeats. Search generatio
 
   The §2.3.1 result of `+17.4 pp, p = 0.0207` against `meta_T0` came from a paired t-test, which Addendum 2 does not use. It stays descriptive.
 - **The unified eval reproduces the original evals.**
-  - Every method's mean moves by at most 0.8 pp, and every per-seed value by at most 2.3 pp.
-  - The Vertex-vs-local confound of §2.5.3 does not matter: `arch_coev` moves by −0.5 pp.
+  - Every method's mean moves by at most 0.8 pp, and every per-seed value by at most 2.8 pp (`llm_judge` seed 4).
+  - The Vertex-vs-local confound of §2.5.3 does not matter: `arch_coev` moves by −0.5 pp (per seed +0.0 / +0.7 / −1.0 / −0.9 / −0.0 / −1.9).
   - Backend check: the reused harnesses' rep 1 − rep 2 is +0.2 pp signed, 1.1 pp absolute, against 1.3 pp absolute for fresh single-call harnesses. Repeat 1 is kept.
   - Repeat noise: over 48 repeat pairs, mean |Δ `correct`| = 1.3 pp (max 5.6), and 7.6% of tasks change outcome.
+- **Protocol B (live deployment, one script per variant) on its 100-task subset.**
+  - That subset is 0.6–2.5 pp easier under Protocol A for every method (`naive` 35.1 against 33.8%, `arch_coev` 41.8 against 40.5%). That accounts for part of the A-to-B rise.
+  - Tasks that Protocol A scored `correct` stay correct under B for 94.2% (`naive`) and 87.3% (`arch_coev`).
+  - B recovers 19.5% of `arch_coev`'s Protocol A `error` tasks (29/149) and 9.7% of its `lucky` tasks, against 16.7% and 1.9% for `naive`.
+  - `meta_T0` rises the most, from 23.3% to 30.5%, as its errors fall from 41.3% to 18.8%. This is consistent with scripts written on each variant's own workspace avoiding the mid-latitude `estimate_utm_crs()` choice made on `low`, though the eval does not show that directly.
 - **Seed 0 is a genuinely favourable seed.**
   - The unified seed-0 gap (seed 0 minus the mean of seeds 1–5) is +13.6 / +18.2 / +18.4 pp for `naive` / `meta_gate_only` / `oracle_soft`. The original evals gave +15.0 / +19.6 / +19.3.
   - The mean, +16.7 pp, is above the 10 pp threshold of Addendum 2. So the seed-0 advantage lives in the evolved harnesses themselves, not in the eval server.
@@ -438,35 +443,43 @@ Mean ± sd over 6 seeds, each seed averaged over its 2 repeats. Search generatio
 
 Share of scored variants correct (per variant, not all-or-nothing), mean over seeds and repeats:
 
-| Method | designed | blind, all | area-weighted | 0–30° | 30–60° | 60–80° | 80–89° | large | UTM-valid zone | polar zone | − `naive`, all (pp) [t₅ 95%] | p |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
-| `naive` | 40.7 | 43.0 | 48.2 | 52.7 | 36.8 | 31.5 | 31.1 | 70.9 | 36.6 | 31.2 | — | — |
-| `darwinx_soft` | 38.2 | 40.5 | 45.7 | 51.6 | 35.2 | 30.7 | 29.7 | 61.5 | 35.3 | 29.7 | −2.5 [−10.9, +5.9] | 0.62 |
-| `meta_gate_only` | 44.5 | 47.0 | 51.7 | 55.9 | 43.2 | 38.5 | 36.5 | 66.8 | 42.8 | 35.6 | +4.0 [−1.8, +9.8] | 0.16 |
-| `oracle_soft` | 49.3 | 51.6 | 56.1 | 60.4 | 51.8 | 45.9 | 42.6 | 60.7 | 50.4 | 41.1 | +8.6 [+0.4, +16.9] | 0.094 |
-| `meta_T0` | 45.5 | 53.5 | 60.0 | 68.9 | 63.1 | 61.7 | 37.7 | 30.7 | 63.1 | 24.8 | +10.4 [−1.6, +22.5] | 0.12 |
-| `llm_judge` | 54.4 | 58.3 | 63.0 | 65.5 | 62.4 | 56.2 | 46.2 | 63.5 | 60.1 | 41.3 | +15.3 [−3.8, +34.3] | 0.094 |
-| `coev_tip_only` | 56.0 | 61.8 | 66.6 | 75.0 | 72.0 | 70.2 | 53.1 | 31.8 | 71.6 | 43.7 | +18.8 [+11.3, +26.2] | 0.031 |
-| `arch_coev` | 59.5 | 65.4 | 70.7 | 73.5 | 70.4 | 68.4 | 49.1 | 67.3 | 69.9 | 39.0 | +22.4 [+11.7, +33.2] | 0.031 |
+| Method | designed | blind, all | area-weighted | 0–30° | 30–60° | 60–80° | 80–89° | large | UTM-valid zone | polar zone | − `naive`, all (pp) [t₅ 95%] | t₅ Bonferroni/14 | sign-flip p | Holm p |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|
+| `naive` | 40.7 | 43.0 | 48.2 | 52.7 | 36.8 | 31.5 | 31.1 | 70.9 | 36.6 | 31.2 | — | — | — | — |
+| `darwinx_soft` | 38.2 | 40.5 | 45.7 | 51.6 | 35.2 | 30.7 | 29.7 | 61.5 | 35.3 | 29.7 | −2.5 [−10.9, +5.9] | [−19.4, +14.4] | 0.62 | 0.62 |
+| `meta_gate_only` | 44.5 | 47.0 | 51.7 | 55.9 | 43.2 | 38.5 | 36.5 | 66.8 | 42.8 | 35.6 | +4.0 [−1.8, +9.8] | [−7.7, +15.7] | 0.16 | 0.47 |
+| `oracle_soft` | 49.3 | 51.6 | 56.1 | 60.4 | 51.8 | 45.9 | 42.6 | 60.7 | 50.4 | 41.1 | +8.6 [+0.4, +16.9] | [−8.0, +25.2] | 0.094 | 0.47 |
+| `meta_T0` | 45.5 | 53.5 | 60.0 | 68.9 | 63.1 | 61.7 | 37.7 | 30.7 | 63.1 | 24.8 | +10.4 [−1.6, +22.5] | [−13.7, +34.6] | 0.12 | 0.47 |
+| `llm_judge` | 54.4 | 58.3 | 63.0 | 65.5 | 62.4 | 56.2 | 46.2 | 63.5 | 60.1 | 41.3 | +15.3 [−3.8, +34.3] | [−23.0, +53.5] | 0.094 | 0.47 |
+| `coev_tip_only` | 56.0 | 61.8 | 66.6 | 75.0 | 72.0 | 70.2 | 53.1 | 31.8 | 71.6 | 43.7 | +18.8 [+11.3, +26.2] | [+3.8, +33.7] | 0.031 | 0.22 |
+| `arch_coev` | 59.5 | 65.4 | 70.7 | 73.5 | 70.4 | 68.4 | 49.1 | 67.3 | 69.9 | 39.0 | +22.4 [+11.7, +33.2] | [+0.8, +44.0] | 0.031 | 0.22 |
 
 - **Reading 1, as narrowed in Addendum 2, holds for `arch_coev` and `coev_tip_only`: their gain is not tied to the probes' coordinates.**
   - On the blind variants, `arch_coev`'s advantage over `naive` is +22.4 pp, against +18.8 [+8.2, +29.3] on the designed variants with the same per-variant metric. All 6 seeds are positive (+8.9 to +33.1). The Bonferroni interval over 14 comparisons is [+0.8, +44.0].
   - The advantage stays where the probes are far away: +21.2 [+11.2, +31.2] in the ≥ 15° signed probe-distance bin, and +23.5 [+9.7, +37.3] at ≥ 15° in |latitude|.
-  - These are descriptive results.
-  - `meta_gate_only`'s advantage is small everywhere: +4.0 blind, +3.8 designed.
+  - These are descriptive results. The raw p = 0.031 is the smallest possible with 6 seeds; Holm-adjusted it is 0.22.
+- **What the blind gain can be attributed to.**
+  - It belongs to two-stage diagnostic co-evolution, not to archive preservation. `coev_tip_only` has the same 14 generations and the same 3 certified probes but no archive, and it already gains +18.8 pp. `arch_coev − coev_tip_only` is +3.7 pp (p = 0.44), and −2.1 pp at ≥ 15° from the probes.
+  - It is not the gate alone. With 6 generations, the binary gate without diagnostics (`meta_gate_only`) gains +4.0 pp, while the static `llm_judge`, which uses no probes, gains +15.3 pp (`arch_coev − llm_judge` +7.2, p = 0.34).
+  - Both co-evolution methods searched 14 candidate generations against 6 for every other method. Their probes were certified once by a closed model (`gemini-4-hydrogen`). There is no 14-generation `naive` or `llm_judge` control, so the search budget is not separated from the method.
+  - In the UTM-valid zone, the fixed mid-latitude `meta_T0` (6 generations, no certified probes) already reaches 63.1%. That is +26.5 pp over `naive`, about 80% of `arch_coev`'s +33.3.
 - **The gain stays inside the mechanisms the probes exercise.**
   - `arch_coev` gains +33.3 pp in the UTM-valid zone, where `naive`'s EPSG:3857 scripts break.
-  - It gains only +7.8 pp in the polar zone beyond the UTM limits, +2.3 pp in the equatorial weak-proxy zone, and −3.6 pp on the large families.
+  - It gains only +7.7 pp [−2.1, +17.5] (p = 0.125) in the polar zone beyond the UTM limits, +2.3 pp in the equatorial weak-proxy zone, and −3.6 pp on the large families.
+  - The 2 antimeridian-crossing blind scenes are listed, not analysed (Addendum 2): every method gets exactly 1 of the 2 right.
   - In absolute terms, `arch_coev` is right on 39% of polar-zone variants.
   - `meta_T0`'s fixed mid-latitude probe gives the same pattern, in a stronger form: 63% in the UTM-valid zone, 25% in the polar zone, and 31% on large families.
-- **Why the blind gain (+22.4) is larger than the strict Protocol A gain (+6.7).**
-  - The strict metric needs one script to be right on every designed variant, including polar and antimeridian scenes. The per-variant metric credits a script that is right on most positions.
-  - `arch_coev` seed 1 shows this: −15.1 pp on the strict metric, +20.9 pp per variant.
-  - The difference therefore comes from the metric, not from blind against designed positions.
+- **Why the blind gain (+22.4) is larger than the strict Protocol A gain (+6.7).** Three steps, recomputed on the same Protocol A records (the reviewer's decomposition, checked):
+  1. Strict to per-variant on the same designed variants, `low` included: +6.7 → +13.6 pp. The strict metric needs one script to be right on every variant; the per-variant metric credits partial success.
+  2. Dropping `low`: +13.6 → +18.8 pp. On `low` itself `arch_coev` is −1.1 pp behind `naive` (−12.8 on seed 1, −16.0 on seed 2). `low` is about 29% of the designed variants (per task), but the equatorial zone is under 9% of the blind ones.
+  3. Designed non-`low` to blind positions: +18.8 → +22.4 pp. The designed non-`low` variants of local families put about 40% of their weight beyond 85° (380 of 980), where `arch_coev` gains least. The blind set puts about 69% in the UTM-valid zone and 22% in the polar zone.
+  - On seed 1 the chain is −15.1 → +5.1 → +11.2 → +20.9. Its blind score benefits from the composition step (+9.7), since that seed's `estimate_utm_crs()` scripts fail mostly at the poles.
+  - Under this decomposition the blind gain is still not a probe-coordinate artifact. But how large it is depends on the metric and on how many polar and equatorial scenes the evaluation includes.
 - **Timeouts (Addendum 4).**
   - Over all methods, the first pass had 49 blind and 24 held-out timeouts. After the one retry, 15 and 7 remain.
   - Per method, `arch_coev` went from 34 → 7 blind and 17 → 3 held-out, `darwinx_soft` stayed at 8 and 4, and `llm_judge` went from 7 and 2 to 0. Every other method had at most 1, and none after the retry.
   - The remaining timeouts are at most 0.02% of a method's 42,636 blind runs.
+  - The retry barely matters. 20 of `arch_coev`'s retried blind runs turned correct (0.05% of its runs). The reviewer reverted every retried record to a timeout, and `arch_coev − naive` moved by 0.05 pp on blind, 0.16 pp on E2 far and 0.07 pp on E2 near. No sign or interval changed.
 
 ### 3. Held-out failure mechanisms (E2): the same scripts on `low` scenes with an unseen storage convention
 
@@ -488,20 +501,25 @@ Share of scored variants correct:
   - Among scripts right on `low`, both methods keep ≥ 90% under the mechanism (98.8% and 99.8%). Rasterio reads south-up rasters transparently, so this comparison cannot separate the methods (Amendment 2).
   - The `bothlow` version is −0.6 pp.
   - The per-seed spread reflects differences in which raster tasks each method solves on `low`, not the mechanism.
-- **No method shows a held-out gain.**
-  - On near-transfer mechanisms (new forms of CRS, units and nodata), every interval against `naive` includes 0. `arch_coev`'s +4.3 pp is +3.8 on tasks both methods solve on `low` (p = 0.19).
+- **No method shows a held-out gain overall.**
+  - On near-transfer mechanisms (new forms of CRS, units and nodata), every interval against `naive` includes 0. `arch_coev`'s +4.3 pp is +3.8 on tasks both methods solve on `low` (p = 0.19). On the 160 raster tasks that have both near and far variants (`matched:near`) it is +0.8 [−12.5, +14.1].
+  - Per mechanism, `arch_coev − naive` goes in opposite directions:
+    - `us_ft` +10.9 [+1.5, +20.3] (6/6 seeds, p = 0.031, descriptive). The km-units probe exercises reading a CRS's linear unit, and that carries over from kilometres to US survey feet.
+    - `albers` −1.8. Local Albers is an equal-area projection in metres, so a script that ignores the CRS and takes planar `.area` in native coordinates gets area tasks right. That is why `naive` (72.4%) and `darwinx_soft` (75.5%) score high there.
+    - `nodata_nan` +1.1. Of `arch_coev` seed 0's 90 scripts that are right on `low`, 33 fail `nodata_nan`: 19 return NaN and 14 return 0.0. A text search does not explain why; all 33 also call `isnan` or `isfinite` somewhere.
   - On `csv_lon360`, every gated or judged method is below `naive`: `arch_coev` −9.1 [−34.0, +15.9], `llm_judge` −22.4.
   - Over all held-out variants, `llm_judge` is the only method whose interval excludes 0: −11.3 [−19.1, −3.4].
   - `nodata_nan` is the hardest mechanism for every method (38–45%).
-  - Together with §2.6.2, the gate's gain on relocated positions does not carry over to storage conventions the probes do not write. This is consistent with M1's broader point that the probes and the designed variants share failure mechanisms.
+  - Together with §2.6.2: across held-out storage conventions, the co-evolved harnesses establish no gain (near +4.3 pp, interval includes 0). There is descriptive transfer only where the fix a probe exercises applies directly (`km` → `us_ft`, +10.9 pp), and none on `nodata_nan` (+1.1) or `csv_lon360` (−9.1). This is consistent with M1's broader point that the probes and the designed variants share failure mechanisms.
 
 ### 4. What this changes
 
 - **§2.3.1 and §2.5.3.** The 6-seed table in §2.3.1 and the 6-seed baselines of §2.5.3 are superseded by the table in §2.6.1. The original numbers stay where they were, and they reproduce within 0.8 pp per method. The leading position of `arch_coev` and its comparisons against single methods are descriptive.
 - **The thesis claim, as the data now support it.**
   - Over 6 seeds, no method establishes a gain on the strict endpoint.
-  - Descriptively, archive-preserving co-evolution writes scripts that are right on more relocated positions: +22 pp per variant over `naive`, on 6/6 seeds, and not tied to the probes' coordinates.
-  - That gain stays within the failure mechanisms the probes exercise (Web Mercator distortion and the UTM range). It shrinks to +8 pp beyond the UTM limits, does not appear on held-out storage mechanisms, and comes with more loud failures (25% errors against 3%).
+  - Descriptively, two-stage diagnostic co-evolution writes scripts that are right on more relocated positions. Per variant over `naive`, `coev_tip_only` gains +19 pp and `arch_coev` +22 pp, on 6/6 seeds, and the gain is not tied to the probes' coordinates.
+  - That gain comes at 14 against 6 search generations, with 3 probes certified by a closed model. At 6 generations the binary gate alone (`meta_gate_only`) gives +4 pp and the static `llm_judge` +15 pp. Archive preservation adds little on blind positions (+3.7 pp, p = 0.44).
+  - The gain stays within the failure mechanisms the probes exercise (Web Mercator distortion and the UTM range). It shrinks to +7.7 pp [−2.1, +17.5] beyond the UTM limits. Across held-out storage conventions it establishes nothing, apart from a descriptive +10.9 pp on `us_ft`. It also comes with more loud failures: 25% errors against 3%.
 
 ---
 
@@ -509,7 +527,7 @@ Share of scored variants correct:
 
 | ID | Risk / Reviewer Critique | Current Status | Concrete Mitigation |
 |---|---|---|---|
-| **R1** | **Target-location overlap**: `metamorphic.py` relocates local inputs to `(58.3°, 6.0°)` / `(-56.2°, 12.0°)`, overlapping GSB v1 `high`/`zone_edge`. | **Measured (2026-11-26): position yes, mechanism no** | §2.6.2–3 (pre-registered, descriptive). `arch_coev`'s per-variant gain over `naive` on blind positions (+22.4 pp, 6/6 seeds) matches its gain on the designed variants (+18.8) and holds ≥ 15° from every probe (+21.2). It shrinks to +7.8 pp beyond the UTM limits. On held-out storage mechanisms, no method beats `naive`: near +4.3 [−5.5, +14.1], and the far comparison is uninformative. Earlier evidence: polar Protocol A/B on GSB v1 (Demonstrated self-certified polar verifier discovery breaking Polar-A (`0.2% → 85.9%`) and Polar-B (`13.6% → 82.1%`) with zero polar hints or labels; expanding to polar + antimeridian + raster/OSM in GSB v2.) |
+| **R1** | **Target-location overlap**: `metamorphic.py` relocates local inputs to `(58.3°, 6.0°)` / `(-56.2°, 12.0°)`, overlapping GSB v1 `high`/`zone_edge`. | **Measured (2026-11-26): position yes, mechanism no** | §2.6.2–3 (pre-registered, descriptive). `arch_coev`'s per-variant gain over `naive` on blind positions (+22.4 pp, 6/6 seeds) matches its gain on the designed variants (+18.8) and holds ≥ 15° from every probe (+21.2). It shrinks to +7.7 pp beyond the UTM limits. Most of it is shared with `coev_tip_only` (+18.8), which uses the same 14 generations. On held-out storage mechanisms, no method beats `naive`: near +4.3 [−5.5, +14.1], and the far comparison is uninformative. Earlier evidence: polar Protocol A/B on GSB v1 (Demonstrated self-certified polar verifier discovery breaking Polar-A (`0.2% → 85.9%`) and Polar-B (`13.6% → 82.1%`) with zero polar hints or labels; expanding to polar + antimeridian + raster/OSM in GSB v2.) |
 | **R2** | **Diagnostic hint leakage in v0.2**: `evaluator.py` previously appended a GIS/CRS hint string inside `meta_diag`. | **Resolved (2026-11-21)** | Verified `--minimal-meta-prompt` + anonymized `probe_1/probe_2` AND zero-diagnostic `meta_gate_only` (`80.8%`, 3/3 seeds > `darwinx_soft` `76.9%`). |
 | **R3** | **Missing baselines & seed count**: Need non-evolution baselines, Oracle/soft-DarwinX/LLM-judge controls, and ≥6–8 seeds. | **6 seeds on one server (2026-11-26); confirmatory comparison not established** | §2.6.1: `arch_coev − naive` = +6.7 pp on Protocol A (5/6 seeds, sign-flip p = 0.25). Under Addendum 2, seeds are not added after seeing this result. A new test of the difference needs a new pre-registration with more seeds. |
 | **R4** | **Swallowed-exception degradation**: Rule-heavy prompts and OOD fallbacks silently swallow exceptions. | **Resolved & ablated (2026-11-21)** | Domain-neutral `sys.monitoring` telemetry broke 2nd-order `except RuntimeError: EPSG:3857` lock-in during polar co-evolution (`16.7% → 88.9%` in-loop). |
@@ -533,7 +551,7 @@ Share of scored variants correct:
 - [x] **Two-Timescale Weight Internalization on GSB v2 (Wave S4-2)** *(done 2026-11-25)*: Completed disjoint `train[20:60]` `SFT-Weak` vs `SFT-Meta` + 24-step alternating `GRPO-Metamorphic` (3 certified probes, `0/768` `EPSG:3857`) on Colab G4 96 GB: bare `seed.py` climbs `30.7% → 56.2% → 62.4%` (`SFT-Weak = 30.4%`), Gen-2 zero-GIS-rule compounding reaches **`68.2%` ALL / `69.3%` HO** (`+5.3 pp` / `+9.3 pp` over Teacher) and **`100.0%` real OSM** (`GRPO-Meta` bare `91.7%` vs `SFT-Weak` `12.5%`).
 
 ### Phase P2 — External Generalization & Publication
-- [x] **6-Seed GSB v2 Matrix + Archive-Preserving Co-Ev + 6-Seed OSM** *(Wave 1A/1B/1C done 2026-11-25)*: Completed 6 seeds each of `darwinx_soft`, `meta_T0`, `llm_judge`, `coev_tip_only`, `arch_coev` (`41.0 ± 13.6%`, `+17.4 pp` vs `meta_T0` $p=0.0207$, 5/6 breakout), 6-seed real OSM transfer (`86.1 ± 26.2%`, 5/6 at `91.7%–100.0%`), plus `runtime_meta`, `naive`, `meta_gate_only`, `oracle_soft`.
+- [x] **6-Seed GSB v2 Matrix + Archive-Preserving Co-Ev + 6-Seed OSM** *(Wave 1A/1B/1C done 2026-11-25)*: Completed 6 seeds each of `darwinx_soft`, `meta_T0`, `llm_judge`, `coev_tip_only`, `arch_coev` (`41.0 ± 13.6%`, `+17.4 pp` vs `meta_T0` $p=0.0207$, 5/6 breakout; *superseded by the unified re-evaluation, §2.6: +6.7 pp vs `naive`, p = 0.25, and the `meta_T0` comparison is descriptive*), 6-seed real OSM transfer (`86.1 ± 26.2%`, 5/6 at `91.7%–100.0%`), plus `runtime_meta`, `naive`, `meta_gate_only`, `oracle_soft`.
 - [x] **Non-GIS Cross-Domain Generalization (`SciUnits`, Wave 1C)** *(done 2026-11-25)*: Completed 3-seed paired symmetric `26B → 26B` (`7.1%` vs `7.1%`, Meta-Agent synthesis bottleneck) and `gemini-4-hydrogen → 26B` (`darwinx` 3/3 locked at `7.1% / 91.4% Lucky` vs `meta_soft` `10.4 ± 7.5%`, `s2 = 18.2% ALL / 13.3% HO / 0.0% Err`, revealing the isomorphic static tabular verifier coverage gap).
 - [x] **External Benchmark Transfer (`GeoAnalystBench`, Wave S4-2)** *(done 2026-11-25)*: Audited all 4 weights at `max_tokens=4096` (`100% syntax_ok`): `SFT-Meta` / `GRPO-Meta` lift `dynamic_crs_vec` from **`0.0% → 71.4%`** and `strict_geo_sound` from `76.5% → 88.2% / 82.3%`, whereas `SFT-Weak` degrades to `64.7%` (`raster_nodata_safe 75.0% → 37.5%`).
 
