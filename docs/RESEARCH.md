@@ -628,6 +628,36 @@ Silent and loud failures, Protocol A (meta / weak / bare): silent 62.1 / 62.9 / 
 - [x] **Non-GIS Cross-Domain Generalization (`SciUnits`, Wave 1C)** *(done 2026-11-25)*: Completed 3-seed paired symmetric `26B → 26B` (`7.1%` vs `7.1%`, Meta-Agent synthesis bottleneck) and `gemini-4-hydrogen → 26B` (`darwinx` 3/3 locked at `7.1% / 91.4% Lucky` vs `meta_soft` `10.4 ± 7.5%`, `s2 = 18.2% ALL / 13.3% HO / 0.0% Err`, revealing the isomorphic static tabular verifier coverage gap).
 - [x] **External Benchmark Transfer (`GeoAnalystBench`, Wave S4-2)** *(done 2026-11-25)*: Audited all 4 weights at `max_tokens=4096` (`100% syntax_ok`): `SFT-Meta` / `GRPO-Meta` lift `dynamic_crs_vec` from **`0.0% → 71.4%`** and `strict_geo_sound` from `76.5% → 88.2% / 82.3%`, whereas `SFT-Weak` degrades to `64.7%` (`raster_nodata_safe 75.0% → 37.5%`).
 
+### Phase P3 — Controls and Pre-Registered Re-Evaluation *(2026-11-25 – 2026-11-27)*
+- [x] **Gate false-rejection audit** (§2.4). The gate rejects 6–20% of oracle-correct scripts. 15 of 96 audited rejections are errors in the gate itself.
+- [x] **Rebuttal controls for weight internalization** (§2.5). The S4-2 `SFT-Meta` gain comes from the teacher. With the same teacher, the weak filter does as well.
+- [x] **Unified 6-seed re-evaluation, blind relocation and E2** (§2.6, pre-registered). The confirmatory comparison `arch_coev − naive` is not established (+6.7 pp, p = 0.25). The blind-position gain is descriptive (+22.4 pp, 6/6 seeds) and limited to the mechanisms the probes exercise.
+- [x] **E1, teacher-free best-of-K self-distillation** (§2.7, pre-registered). The data are cleaner, but the model is no better (Reading 2).
+
+### Phase P4 — Next Steps *(planned 2026-11-27, in priority order)*
+Each new test needs its own pre-registration before any data are seen.
+- [ ] **Search-budget-matched control.**
+  - The co-evolution methods searched 14 candidate generations; every other method searched 6.
+  - Run `naive`, `meta_gate_only` and `llm_judge` for 14 generations, or cap co-evolution at 6.
+  - This decides whether the blind-position gain (+22.4 pp) comes from the method or from the budget (§2.6.4).
+- [ ] **A new confirmatory test with more seeds** (R3).
+  - At the observed per-seed spread (sd 11.1 pp), detecting +6.7 pp with 80% power needs about 24 seeds. The paired t-test and a simulation of the exact sign-flip test agree on this.
+  - Because the seeds would be new, the pre-registration may make blind per-variant accuracy the primary endpoint.
+- [ ] **Gate fixes** (R6).
+  - Already in the E1 gate: the polar probe's antimeridian split, pole cap and geodesic densification, and a 2% agreement tolerance.
+  - Still open:
+    - skip relocating probes when the answer is an absolute position;
+    - use sum- or majority-preserving resampling for thresholded rasters;
+    - report the false-rejection breakdown next to every gate result.
+  - A NaN-nodata probe would close the `nodata_nan` gap (§2.6.3). `nodata_nan` is an E2 held-out mechanism, though, so adding that probe requires new held-out mechanisms.
+- [ ] **Open-weight probe certification** (R5). The 3 GSB v2 probes were certified once, by the closed `gemini-4-hydrogen`. Certify them with `gemma-4-26B-A4B-it` and rerun the co-evolution methods, so the loop contains no closed model.
+- [ ] **Loud failures under co-evolution.** `arch_coev` errors on 25.4% of Protocol A tasks, against 3.0% for `naive` (§2.6.1). Classify these errors by cause.
+- [ ] **E1 follow-up** (optional).
+  - E1 cannot say whether the filter helps with more data, or on families where the weak check and the gate disagree more often. One option is more training tasks, or a larger K, on the multi-step families.
+  - Separately, test the descriptive OSM difference (+5.4 pp) on new OSM cities.
+- [ ] **Bring the older text in line with the evidence.** The Core Claim (§2) and §2.1–2.3 still use v0.2–v0.6 wording, such as "slashes spurious correctness", that §2.6–2.7 do not support.
+- [ ] **Non-GIS generalization** (`SciUnits`, lower priority). The symmetric `26B → 26B` run stays at 7.1%, limited by the meta-agent's synthesis (§2.3.3).
+
 ---
 
 ## 5. Local Run & Artifact Registry (Gitignored Data)
