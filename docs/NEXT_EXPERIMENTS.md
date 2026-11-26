@@ -4,6 +4,8 @@ Two experiments that answer the open points of the independent review (`runs/age
 
 ## E1. Teacher-free best-of-K self-distillation: does the metamorphic filter add value once the model can write candidates?
 
+> **Result (2026-11-27, `docs/RESEARCH.md` §2.7).** Confirmatory `bok_meta − bok_weak` on Protocol A: −0.0 pp, 6 replicates, sign-flip p = 1.0. Not established; Reading 2. The data-link test is positive (+26.4 pp pool precision, p = 0.031).
+
 **Why.** §2.5 shows two things:
 - With a strong teacher, the filter makes no difference.
 - With bare-model data and one sample per task, the filter mostly shrinks the training set to 4 easy families (142/147 scripts), so it is never tested where it could matter.

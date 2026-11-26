@@ -521,6 +521,64 @@ Share of scored variants correct:
   - That gain comes at 14 against 6 search generations, with 3 probes certified by a closed model. At 6 generations the binary gate alone (`meta_gate_only`) gives +4 pp and the static `llm_judge` +15 pp. Archive preservation adds little on blind positions (+3.7 pp, p = 0.44).
   - The gain stays within the failure mechanisms the probes exercise (Web Mercator distortion and the UTM range). It shrinks to +7.7 pp [−2.1, +17.5] beyond the UTM limits. Across held-out storage conventions it establishes nothing, apart from a descriptive +10.9 pp on `us_ft`. It also comes with more loud failures: 25% errors against 3%.
 
+
+## 2.7 E1: Teacher-Free Best-of-K Self-Distillation (`runs/v12_e1_bok/`, 2026-11-27)
+
+**Question.** Does the metamorphic filter improve distillation data beyond the weak check once the model can write several candidates? §2.5 could not tell. With a strong teacher there was nothing to filter, and with one bare-model sample per task the filter mostly shrank the data.
+
+**Pre-registration.** The design, the analysis script and its tests were committed before any E1 data: `docs/NEXT_EXPERIMENTS.md` (E1, Amendments 1–3) and `scripts/rebuttal/e1_summary.py` (`bd52507`). The only later code change moved an import (`1996260`). The analysis ran once, after all 39 evals were in and audited.
+
+**Setup.**
+- **Candidate pool.** Bare `gemma-4-26B-A4B-it` with `seed.py` sampled K = 16 scripts per task on `train[20:60]` (600 tasks, temperature 0.8).
+- **Gate.** The E1 gate: built-in plus the 3 certified probes, with the polar probe fixed (antimeridian split, pole cap, geodesic densification) and a 2% agreement tolerance.
+- **Arms.** T is the set of tasks with at least one candidate that passes the weak check and the gate. For each task in T and replicate r, one random permutation of its candidates is drawn:
+  - `bok_weak` keeps the first candidate correct on `low`;
+  - `bok_meta` keeps the first that also passes the gate.
+- **Training.** 6 replicates, each with its own draw seed and training seed, so 12 LoRAs (SFT recipe of `sft_meta`, 2 epochs). All replicates come from the one pool, so inference is conditional on it.
+- **Evaluation.** All 12 LoRAs and the bare model ran on one Colab A100 80 GB vLLM server: bf16, temperature 0, 1 call per task, bare `seed.py`. The evals cover:
+  - Protocol A on all 450 GSB v2 test tasks;
+  - Protocol B on the 100-task subset;
+  - the 8-city OSM set (96 tasks).
+
+  The GPU differs from the unified re-evaluation's G4, so the numbers here are comparable with each other, not with §2.6.
+- **Audit.** 39/39 evals are clean.
+
+**Reported first (pre-registered).**
+- |T| = 237 of 600 tasks, from 11 families. 194 of them (82%) come from 5 families:
+  - `district_mean_zero_trap_v2` 40, `large_region_area_v2` 40, `raster_zonal_mean` 40;
+  - `topological_containment_v2` 38, `raster_pop_exposure` 36.
+
+  The multi-step families rarely have any candidate that passes both checks.
+- The two arms keep different scripts on 36–44 of the 237 tasks (15–19%) per replicate.
+- Oracle-correct share of the training scripts: `bok_weak` 81.0–81.4%, `bok_meta` 89.5–91.1%, so 20–24 more correct scripts per replicate.
+
+**Data link (pre-registered attribution test).** Per task in T, the oracle-correct share of the candidates that pass the gate minus that of the candidates that pass the weak check, averaged within family: **+26.4 pp over 11 families, exact sign-flip p = 0.031**. The gate-filtered pool is cleaner.
+- The gain sits in `large_route_length_v2` (+87.9), `area_weighted_pop_filter` (+58.1), `multi_ring_density` (+49.9), `buffer_exclusion_area` (+42.7), `raster_buffer_extract` (+30.8) and `nearest_service_gap` (+21.2).
+- It is 0 in the 5 families that dominate T, where the weak check already selects correct scripts.
+
+**Results.**
+
+| Eval | `bok_meta` | `bok_weak` | Bare model | `meta − weak` (pp), per replicate | Mean [t₅ 95%] | Sign-flip p |
+|---|---:|---:|---:|---|---|---:|
+| **Protocol A, 450 tasks (confirmatory)** | 31.6 ± 1.3% | 31.6 ± 0.6% | 30.9% | +1.3 / +0.0 / −1.3 / +1.8 / +0.2 / −2.2 | **−0.0 [−1.6, +1.6]** | **1.00** |
+| Protocol B, 100 tasks | 29.3 ± 1.8% | 30.5 ± 1.9% | 30.0% | +1.0 / −2.0 / −2.0 / −1.0 / −2.0 / −1.0 | −1.2 [−2.4, +0.1] | 0.125 |
+| 8-city OSM, 96 tasks | 62.0 ± 5.1% | 56.6 ± 5.5% | 57.3% | −1.0 / +5.2 / +9.4 / +9.4 / +13.5 / −4.2 | +5.4 [−1.8, +12.5] | 0.16 |
+
+Silent and loud failures, Protocol A (meta / weak / bare): silent 62.1 / 62.9 / 62.9%, errors 6.3 / 5.5 / 6.2%. On OSM, silent failures are 29.7 / 37.2 / 37.5% and errors 8.3 / 6.2 / 5.2%.
+
+- **The confirmatory comparison is not established, and the pre-specified Reading 2 holds: no added value.** The difference is −0.0 pp: 3 replicates are positive, 2 negative and 1 tied. The family-cluster bootstrap gives [−2.4, +2.0]. As pre-registered, the claim that metamorphic filtering improves training data beyond the weak check is dropped for GSB v2.
+- **Cleaner data did not turn into a better model.** The gate raised the oracle-correct share of the training scripts by about 9 pp, and of the candidate pool by 26 pp. Yet both arms end within 0.7 pp of the bare model under both Protocol A and Protocol B.
+  - At this scale, the distillation barely moves the model.
+  - The 237 tasks are dominated by 5 families where the two arms pick the same script.
+  - The arms differ on 15–19% of tasks.
+
+  E1 therefore shows that the filter adds nothing here. It cannot show whether the filter would add value with more data, or with data where the weak check and the gate disagree more often.
+- **On OSM, descriptively, `bok_meta` is ahead.**
+  - The difference is +5.4 pp (4/6 replicates, p = 0.16), and `bok_meta` has 7.5 pp fewer silent failures than `bok_weak`.
+  - `bok_weak` sits at the bare model's level.
+  - The direction matches §2.5 (`sft_base_meta − sft_base_weak` +16.7 pp on the same OSM set), but the effect is smaller and not established.
+- **Against §2.5** (descriptive, different server): the E1 arms (31.6%) sit where `sft_base_weak` (31.6%) and `sft_base_meta` (32.4%) did on Protocol A.
+
 ---
 
 ## 3. Open Methodological Risks & Mitigation Tracker
@@ -533,7 +591,7 @@ Share of scored variants correct:
 | **R4** | **Swallowed-exception degradation**: Rule-heavy prompts and OOD fallbacks silently swallow exceptions. | **Resolved & ablated (2026-11-21)** | Domain-neutral `sys.monitoring` telemetry broke 2nd-order `except RuntimeError: EPSG:3857` lock-in during polar co-evolution (`16.7% → 88.9%` in-loop). |
 | **R5** | **Bounded iteration vs true RSI**: Fixed human-written `metamorphic.py` + closed-API Meta-Agent. | **Weakened (2026-11-25)**: §2.5 attributes the weight-level gains to a single strong teacher; weak-filter SFT and weak-reward GRPO match the metamorphic versions. The GSB v2 probes were certified by a closed model. | Verified (a) non-circular self-certified verifier co-evolution, (b) 100% open-weight symmetric `26B → 26B` evolution, and (c) Dual-G4 Two-Timescale Harness → SFT + GRPO-Metamorphic → Gen-2 compounding (`36.5% → 93.3%`). |
 | **R6** | **Gate false rejections**: the metamorphic gate assumes every probe preserves the answer. | **Measured and traced (2026-11-25), open** | Section 2.4: the full gate rejects 5.8–20.4% of oracle-correct GSB v2 scripts. 15 of the 96 rejections are gate errors: a probe that changes the reference answer (6), malformed antimeridian geometry from the polar probe (8), and a tolerance tighter than the oracle's (1); the rest fail on answer-preserving inputs the oracle does not test (mixed CRSs, km or projected storage, polar scenes). On real OSM, correct absolute-position solutions are rejected (latitude 8/8). Next: split relocated geometries at the antimeridian, widen the agreement tolerance to about twice the oracle's, skip relocating probes for absolute-position answers, use sum- or majority-preserving resampling for thresholded rasters, and report the breakdown next to every gate result. |
-| **R7** | **Teacher vs. filter confound in weight internalization**: `SFT-Weak` and `SFT-Meta` used different teachers. | **Measured (2026-11-25)** | §2.5: with the same teacher the filter makes no difference (Protocol A +2.0, B +0.0 pp); on bare-model data it helps only on real OSM (+16.7 pp). Weak-reward GRPO matches metamorphic-reward GRPO. Claims about the metamorphic signal in weights should rest on the self-distillation result, not on `SFT-Weak` vs `SFT-Meta`. |
+| **R7** | **Teacher vs. filter confound in weight internalization**: `SFT-Weak` and `SFT-Meta` used different teachers. | **Tested (2026-11-27): no added value on GSB v2** | §2.5: with the same teacher the filter makes no difference (Protocol A +2.0, B +0.0 pp). E1 (§2.7, pre-registered, teacher-free best-of-K, 6 replicates): the gate makes the data cleaner (+26.4 pp pool precision, p = 0.031), but `bok_meta − bok_weak` on Protocol A is −0.0 pp (p = 1.0). Both arms stay within 0.7 pp of the bare model. The claim that the filter improves training data is dropped for GSB v2. On OSM the difference is +5.4 pp, descriptive. |
 
 ---
 

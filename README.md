@@ -21,11 +21,11 @@ The current evidence, from pre-registered analyses on a one-server re-evaluation
   - It is not established on storage conventions no probe writes (near transfer +4.3 [−5.5, +14.1]).
   - It costs more loud failures: 25% errors against 3%.
 - **The gain comes with a larger search budget.** Both co-evolution methods searched 14 candidate generations, every other method 6. Their probes were certified once by a closed model. At 6 generations, the binary gate alone (`meta_gate_only`) gives +4.0 pp per variant, and a static LLM judge +15.3 pp.
-- **Weight-level gains come from the teacher, not the filter.** With the same teacher, weak filtering matches metamorphic filtering. On bare-model data, the filter helps only on real OpenStreetMap tasks (+16.7 pp).
+- **Weight-level gains come from the teacher, not the filter.** With the same teacher, weak filtering matches metamorphic filtering.
+- **E1 (pre-registered) finds no added value from the filter on GSB v2.** In teacher-free best-of-K distillation, the gate makes the training data cleaner (+26 pp pool precision, p = 0.031). But `bok_meta − bok_weak` is −0.0 pp on Protocol A (6 replicates, p = 1.0), and both arms stay within 0.7 pp of the bare model. On real OpenStreetMap the filtered arm is +5.4 pp ahead (descriptive, p = 0.16).
 - **The gate rejects 6–20% of correct scripts**, depending on the trajectory source. 15 of 96 audited rejections are errors in the gate itself.
-- **Next: E1**, a teacher-free best-of-K test of whether the filter adds value once the model can write candidates. Its code and analysis are committed before any data; it is waiting for a GPU.
 
-Full tables, statistics and audit notes are in [docs/RESEARCH.md](docs/RESEARCH.md) §2.4–2.6.
+Full tables, statistics and audit notes are in [docs/RESEARCH.md](docs/RESEARCH.md) §2.4–2.7.
 
 ## Method
 
@@ -132,14 +132,26 @@ Values are the share of variants answered correctly.
 - **Real OpenStreetMap, 4 cities, 24 tasks:** `arch_coev` 86.1 ± 26.2% over 6 seeds (5/6 seeds at 91.7–100%), against 29.2% for `darwinx_soft`. Not re-run on the unified server.
 - **`SciUnits` (non-GIS, 3 seeds) and `GeoAnalystBench` (17 tasks):** single small-sample results, reported in [RESEARCH.md §2.3](docs/RESEARCH.md).
 
-## Next: E1, teacher-free best-of-K distillation
+## E1: teacher-free best-of-K distillation
 
-[docs/NEXT_EXPERIMENTS.md](docs/NEXT_EXPERIMENTS.md) fixes the design before any data:
-- The bare model samples K = 16 candidate scripts per training task.
-- One arm keeps a candidate that passes the weak check. The other keeps a candidate that also passes the fixed gate. The two arms draw with common random numbers.
-- 6 replicate LoRA pairs, all trained from that one candidate pool.
+[docs/NEXT_EXPERIMENTS.md](docs/NEXT_EXPERIMENTS.md) fixed the design and the analysis before any data; results are in [RESEARCH.md §2.7](docs/RESEARCH.md).
 
-The confirmatory test is `bok_meta − bok_weak` on Protocol A, an exact sign-flip test over the 6 replicates. A data-link test checks whether the gate-filtered pool is actually cleaner. The runner is `scripts/rebuttal/run_e1_bok.py` and the analysis `scripts/rebuttal/e1_summary.py`; both are committed.
+**Design.**
+- The bare model sampled K = 16 candidate scripts on each of 600 training tasks.
+- On the 237 tasks where some candidate passes both checks, one arm keeps a candidate that passes the weak check, and the other keeps a candidate that also passes the fixed gate. The two draws use common random numbers.
+- 6 replicate LoRA pairs were trained. All 13 models (12 LoRAs plus the bare model) were evaluated on one server.
+
+**Results.**
+
+| Eval | `bok_meta` | `bok_weak` | Bare model | `meta − weak` (pp) [t₅ 95%] | Sign-flip p |
+|---|---:|---:|---:|---|---:|
+| Protocol A, 450 tasks (confirmatory) | 31.6% | 31.6% | 30.9% | −0.0 [−1.6, +1.6] | 1.00 |
+| Protocol B, 100 tasks | 29.3% | 30.5% | 30.0% | −1.2 [−2.4, +0.1] | 0.125 |
+| 8-city OSM, 96 tasks | 62.0% | 56.6% | 57.3% | +5.4 [−1.8, +12.5] | 0.16 |
+
+- **The data-link test is positive.** In the candidate pool, scripts that pass the gate are 26.4 pp more often oracle-correct than scripts that pass only the weak check (11 families, p = 0.031). The training scripts are 90% against 81% oracle-correct.
+- **Cleaner data did not give a better model.** The pre-registered Reading 2 holds, so the claim that metamorphic filtering improves training data beyond the weak check is dropped for GSB v2.
+- **The test is weak.** 82% of the 237 tasks come from 5 easy families where both arms pick the same script, and the arms differ on only 15–19% of tasks.
 
 ## How the evidence was produced
 
