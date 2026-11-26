@@ -1,206 +1,308 @@
 # meta-rsi
 
-**Metamorphic-Gated Recursive Self-Improvement (RSI) for LLM Agents**, evaluated primarily on geospatial analysis tasks where weak verifiers admit *silent errors* (code that executes cleanly and passes local checks, yet fails catastrophically out-of-distribution).
+**Recursive self-improvement of LLM agent harnesses under weak verifiers, on executable geospatial analysis.**
 
-## Core Idea
+A geospatial script can run cleanly, pass a local check, and still be wrong somewhere else on the Earth. A common case is measuring areas in Web Mercator (`EPSG:3857`): near the equator that is almost right, at 60° it is off by a factor of four. A self-improving agent loop that is checked only on easy locations learns such shortcuts and keeps them (*proxy lock-in*).
 
-When self-evolving an Agent Harness against a weak in-loop verifier (such as single-location checks), standard archive policies like scalar hill-climbing (`naive`) or DarwinX-style `Preserve-and-Extend` (`preserve`) suffer from **Proxy Lock-In**: early mutations exploit location-specific shortcuts (e.g., measuring in Web Mercator `EPSG:3857` near the equator), and strict preservation gates then reject genuinely general fixes that drop even a single lucky task.
+`meta-rsi` asks whether **label-free metamorphic checks** can stop this. A metamorphic check moves or re-encodes a task's input so the answer must stay the same, and asks the agent's script for the same answer on both versions. The project builds:
+- the evolution loop and the gates;
+- two silent-error benchmarks (GSB v1 and v2), plus blind and held-out-mechanism test sets;
+- weight-level distillation (SFT, GRPO);
+- the pre-registered analyses used to evaluate all of it.
 
-`meta-rsi` breaks Proxy Lock-In using **Label-Free Metamorphic Invariance Gating**:
-- Given only a task's input workspace $x$ (zero extra labels or hidden test variants), an invariance operator $T(x)$ constructs an equivalent perturbed workspace (local AEQD spatial relocation, ellipsoidal isometry for large extents, `.gpkg` CRS storage flip, and row shuffling).
-- A task counts as verified in-loop only if the emitted script passes the weak check **and** stays self-consistent between $x$ and $T(x)$.
-- A **domain-neutral Meta-Agent** evolves a self-contained Python Agent Harness (`harness.py`) using only in-loop failures, domain-neutral metamorphic drift diagnostics (with optional `--meta-domain-hints` ablation), and a DGM/DarwinX lineage archive with recombination.
+## Status (2026-11-26)
 
-## Documentation
+The current evidence, from pre-registered analyses on a one-server re-evaluation of 48 evolved harnesses (8 methods × 6 seeds):
 
-Long-term project documentation lives under `docs/`:
-- [docs/RESEARCH.md](docs/RESEARCH.md) — Master research plan, verified experiment log, category breakdowns, open methodological risks, and phased roadmap.
-- [docs/LITERATURE.md](docs/LITERATURE.md) — Living literature survey & positioning matrix (RSI/Harness evolution, GeoAI executable benchmarks, silent errors, spurious correctness).
-- [docs/GSB_V1_BASELINE.md](docs/GSB_V1_BASELINE.md) — `benchmarks/gsb` v1 audit, 5-condition zero-shot results (`480 × 8`), rule + `gemini-decision-1` error taxonomy, and skill-contamination evidence.
-- [docs/INFRA_AND_GOTCHAS.md](docs/INFRA_AND_GOTCHAS.md) — Compute inventory, budgets, Colab G4 vLLM & GRPO/LoRA benchmarks, and engineering runbook.
+- **No method establishes a gain on the strict endpoint.** The pre-registered confirmatory comparison, archive-preserving co-evolution (`arch_coev`) against plain hill-climbing (`naive`), is +6.7 pp. That is 5/6 seeds, exact sign-flip p = 0.25.
+- **Descriptively, the two co-evolution methods write scripts that are right on more relocated positions.** Per variant, `coev_tip_only` gains +18.8 pp and `arch_coev` +22.4 pp over `naive` on blind positions, on 6/6 seeds each. The `arch_coev` gain holds 15° or more away from every probe latitude (+21.2 pp), so it is not tied to the probes' coordinates.
+- **That gain stays inside the failure mechanisms the probes exercise** (Web Mercator distortion, the UTM range).
+  - It shrinks to +7.7 pp [−2.1, +17.5] beyond the UTM limits.
+  - It is not established on storage conventions no probe writes (near transfer +4.3 [−5.5, +14.1]).
+  - It costs more loud failures: 25% errors against 3%.
+- **The gain comes with a larger search budget.** Both co-evolution methods searched 14 candidate generations, every other method 6. Their probes were certified once by a closed model. At 6 generations, the binary gate alone (`meta_gate_only`) gives +4.0 pp per variant, and a static LLM judge +15.3 pp.
+- **Weight-level gains come from the teacher, not the filter.** With the same teacher, weak filtering matches metamorphic filtering. On bare-model data, the filter helps only on real OpenStreetMap tasks (+16.7 pp).
+- **The gate rejects 6–20% of correct scripts**, depending on the trajectory source. 15 of 96 audited rejections are errors in the gate itself.
+- **Next: E1**, a teacher-free best-of-K test of whether the filter adds value once the model can write candidates. Its code and analysis are committed before any data; it is waiting for a GPU.
 
-## Verified Results (v0.2, 4 Paired Disjoint Seeds)
+Full tables, statistics and audit notes are in [docs/RESEARCH.md](docs/RESEARCH.md) §2.4–2.6.
 
-- **Task LLM**: frozen `google/gemma-4-E4B-it` (`enable_thinking=False`, `temp=0.0`, max 4 calls/task)
-- **Meta LLM**: `gemini-4-hydrogen` (`thinking_level=low`, domain-neutral system prompt)
-- **Protocol**: 4 disjoint dev splits (36 tasks/seed = 2 per 18 seen families), 4 generations, evaluated on the **full 480 unseen 3-location test set** (360 seen + 120 held-out = 1,440 executions/harness, apples-to-apples with all zero-shot baselines) plus the **full 440-task Polar OOD stress test** (`>84°N / <80°S`).
+## Method
 
-| Method | Seeds | Dev `Low` (Weak) | Dev `Oracle` (3-loc) | Dev Gap | **Test ALL (`n=480`)** | **Test Seen (`n=360`)** | **Test Held-out (`n=120`)** | **Test `Lucky`** | Test `Err` | Calls | Lock-In (Gap ≥15%) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Gen-0 Seed (`harnesses/seed.py`) | 1 | 45.8% | 17.6% | +28.2% | 24.2% | 23.1% | 27.5% | 31.2% | 18.1% | 1.00 | — |
-| `naive` (hill-climbing) | 4 | 84.7 ± 2.8% | 66.7 ± 24.3% | 18.1 ± 23.6% | 66.9 ± 22.7% | 64.7 ± 18.5% | 73.3 ± 35.7% | 18.6 ± 21.6% | 4.1 ± 1.7% | 1.30 | 1/4 |
-| `preserve` (DarwinX-style) | 4 | 75.7 ± 11.9% | 50.7 ± 21.9% | 25.0 ± 12.6% | 52.1 ± 22.4% | 51.0 ± 20.5% | 55.4 ± 29.1% | 24.6 ± 15.4% | 7.4 ± 2.9% | 1.26 | **3/4** |
-| **`metamorphic` (Ours)** | 4 | 80.6 ± 2.3% | **77.8 ± 3.9%** | **2.8 ± 5.6%** | **78.4 ± 3.8%** | **73.8 ± 4.9%** | **92.5 ± 5.1%** | **2.1 ± 1.8%** | 8.9 ± 3.0% | 1.50 | **0/4** |
+**The loop.** A meta-agent evolves a self-contained Python harness (`harness.py`). The harness drives a frozen task LLM that writes and runs analysis scripts. Candidates enter a lineage archive (DGM / DarwinX-style, with recombination) if they pass the in-loop verifier. The meta-agent's prompt is domain-neutral: it sees in-loop failures and drift diagnostics, not GIS rules.
 
-- Best evolved 4B no-think harness (`v3_gis_s2_meta`, `1.29` calls/task) reaches **81.9% ALL / 99.2% Held-out (119/120) / 1.0% lucky**, outperforming zero-shot thinking `gemma-4-26B-A4B-it` (`71.7%` ALL / `13.4%` lucky) by **+10.2%** and `Qwen3.8-27B` (`62.2%`) by **+19.7%** on the exact same 480 tasks.
-- On the **Polar OOD stress test** (`n=440` local tasks at `86.5°N / -85.5°S`, where `estimate_utm_crs()` raises `RuntimeError`), `metamorphic` fails **loudly** (`83.7%` Error, `2.7%` silent wrong) rather than returning silent distorted numbers (`Gen-0 Seed`: `65.9%` silent `Lucky+SilW`; `preserve`: `42.5%`).
+**The gate.** The weak in-loop verifier checks each dev task at one location (`low`, near the equator). The metamorphic gate also requires the same script to give the same answer on transformed copies of the input:
+- **Built-in probes:** relocation to 58.3°N / 56.2°S with row shuffling, and a CRS storage flip.
+- **Certified probes:** 3 further probes proposed and certified by a verifier agent (polar LAEA relocation to 86°N, a Web Mercator–stored GeoPackage, km-unit storage).
 
-## Verified Results (v0.3–v0.7, Audited `usage.errors == 0`)
+No labels or hidden test variants are used.
 
-Full tables, paired statistics, and audit notes live in [docs/RESEARCH.md](docs/RESEARCH.md).
+**Methods compared on GSB v2** (6 seeds each, `gemma-4-26B-A4B-it` as task and meta model):
 
-### 1. Zero-Leakage Ablation & Non-Evolution Baselines (`GSB v1`, `n=480`, E4B no-think)
-- **Non-evolution baselines**: 15-minute expert `handcrafted.py` scores `74.2%` ALL (`1.51` calls); inference-time `runtime_meta.py` scores `70.0%` ALL (`2.12` calls).
-- **Controlled 3-seed ablation** (`--minimal-meta-prompt`, soft regression $\delta=0.14$): the pure binary invariance gate (`meta_gate_only`, **zero metamorphic diagnostic text**) reaches **`80.8 ± 2.0%`** (Held-out `93.6%`, Lucky `4.1%`), beating soft regression `darwinx_soft` (`76.9 ± 1.1%`) on **3/3 seeds** and `handcrafted.py` by `+6.6 pp`. Under a stricter weak proxy (`|lat| ≤ 2.2°`, seed 1), `darwinx_soft` locks in at `35.0%` (`32.5%` lucky) vs. `meta_neutral` at **`79.4%`** (`2.3%` lucky).
-- **Direct GRPO on E4B (60 steps, 1,920 rollouts)**: `GRPO-Weak` increases unseen spurious passes (`31.2% → 38.3%`) while degrading held-out accuracy (`27.5% → 24.2%`); `GRPO-Metamorphic` blocks `389/1,920` shortcuts (`29.8%` lucky) but exposes a sparse-reward exploration bottleneck from scratch (`27.1%` ALL).
+| Method | In-loop verifier | Generations |
+|---|---|---:|
+| `naive` | weak check, hill-climbing | 6 |
+| `darwinx_soft` | weak check, soft regression gate | 6 |
+| `meta_gate_only` | weak check + metamorphic gate, no diagnostic text | 6 |
+| `oracle_soft` | 3-location oracle labels (upper-bound control) | 6 |
+| `meta_T0` | one fixed mid-latitude probe | 6 |
+| `llm_judge` | static LLM code-review rubric | 6 |
+| `coev_tip_only` | Stage 2 co-evolution with the 3 certified probes, from the Stage-1 tip | 6 + 8 |
+| `arch_coev` | the same, keeping the Stage-1 archive (archive-preserving co-evolution) | 6 + 8 |
 
-### 2. 100% Open-Weight Two-Timescale RSI (`gemma-4-26B-A4B-it`, `GSB v1`, `n=480`)
+## Main result: GSB v2, 6 seeds, one server
 
-> **Caveat (2026-11-26, [RESEARCH.md §2.5, R7](docs/RESEARCH.md)).** `SFT-Weak` and `SFT-Meta` below were distilled from different teachers (`darwinx_soft` trajectories vs. the `meta_neutral` seed-1 harness), so their gap does not isolate the filter. The same-teacher control was run on GSB v2 only, where weak and metamorphic filtering gave 60.2% vs. 58.2% (Protocol A); see the Corrections under section 3.
+All 48 harnesses ran on one Colab G4 vLLM server (bf16, temperature 0). Protocol A ran twice on the 450 test tasks: one script is written on `low` and must be right on every variant. All 144 evals are clean. The decision rule was fixed before any comparison ([docs/BLIND_PROTOCOL.md](docs/BLIND_PROTOCOL.md), Addenda 1–4):
+- there is one confirmatory comparison, established only if all 6 seeds agree (exact sign-flip p < 0.05);
+- everything else is descriptive.
 
-Single complete closed-loop run using zero closed APIs, zero 3-location oracle labels in training/evolution, and strictly disjoint dev / distillation / test splits (`runs/v5_two_timescale/`):
+| Method | Correct | Silent failures | Errors | − `naive` (pp) [t₅ 95%] | Sign-flip p |
+|---|---:|---:|---:|---|---:|
+| `naive` | 33.8 ± 5.6% | 63.1% | 3.0% | — | — |
+| `darwinx_soft` | 31.2 ± 1.4% | 63.9% | 4.9% | −2.6 [−8.5, +3.2] | 0.31 |
+| `meta_T0` | 23.3 ± 5.4% | 35.4% | 41.3% | −10.5 [−19.5, −1.5] | 0.062 |
+| `meta_gate_only` | 36.6 ± 7.7% | 55.6% | 7.7% | +2.8 [−0.7, +6.3] | 0.12 |
+| `coev_tip_only` | 37.5 ± 18.1% | 35.3% | 27.1% | +3.7 [−11.8, +19.2] | 0.53 |
+| `oracle_soft` | 39.4 ± 10.7% | 53.1% | 7.5% | +5.6 [−2.2, +13.4] | 0.16 |
+| `llm_judge` | 39.9 ± 15.0% | 42.6% | 17.4% | +6.1 [−12.1, +24.3] | 0.38 |
+| **`arch_coev`** (confirmatory) | 40.5 ± 13.3% | 34.1% | 25.4% | **+6.7 [−5.0, +18.3]** | **0.25** |
 
-| Stage | Model Weights | Eval Harness | Calls | **Test ALL (`n=480`)** | **Held-out (`n=120`)** | **`Lucky`** | **`Err`** |
-|---|---|---|---:|---:|---:|---:|---:|
-| Gen-0 Baseline | Base 26B | Bare `seed.py` | 1.00 | 36.5% | 29.2% | 39.2% | 4.8% |
-| Weak Distillation (`SFT-Weak`) | `sft_weak` LoRA | Bare `seed.py` | 1.00 | **22.5%** | 13.3% | **59.0%** | 0.8% |
-| Stage 1 (`SFT-Meta`) | `sft_meta` LoRA | Bare `seed.py` | 1.00 | **88.3%** | 95.8% | **1.0%** | 6.7% |
-| Stage 2 (`+GRPO-Meta`, 24 steps) | `grpo_meta_final` | Bare `seed.py` | 1.00 | **92.1%** | **97.5%** | **0.4%** | 3.8% |
-| Gen-2 Compounding RSI | `grpo_meta_final` | Generic error-retry harness | 1.09 | **93.3%** | **98.3%** | **0.4%** | **0.4%** |
+Silent failures are `lucky` (right on some variants only) plus `silent_wrong` (wrong everywhere).
 
-*(Under symmetric open-weight harness evolution on 26B-A4B, weak `darwinx_soft` degraded `2/2` seeds to `20.0% / 20.4%` by writing `EPSG:3857` into its own prompt; `meta_neutral` teacher seed 1 reached `86.2%`, while seed 0 reached `42.7%`.)*
+- **The unified eval reproduces the original per-method evals within 0.8 pp.** Repeat noise is 1.3 pp between Protocol A repeats.
+- **Seed 0 was favourable for the evolved harnesses themselves.** Its gap to seeds 1–5 is +16.7 pp on average, so earlier single-seed comparisons are one seed out of six.
+- **Protocol B** (a new script per variant, 100 tasks) gives `arch_coev − naive` = +8.7 pp [−3.8, +21.1] (descriptive).
 
-### 3. Multi-Modal `GSB v2` (6 Seeds, `n=450`), Real OSM Transfer (`n=24`), `SciUnits` & `GeoAnalystBench`
+## Where the gain is, and where it is not (descriptive)
 
-> **Corrections (2026-11-25 and 2026-11-26, [RESEARCH.md §2.5–2.6](docs/RESEARCH.md)).** Claims below that do not survive the rebuttal controls and the unified re-evaluation:
-> 1. **`SFT-Weak` vs `SFT-Meta` is a teacher effect, not a filter effect.** The two used different teachers. With the same teacher, weak filtering matches metamorphic filtering (Protocol A 60.2 vs 58.2%, Protocol B 50.2 vs 50.2%). Weak-reward GRPO also matches metamorphic-reward GRPO.
-> 2. **Over 6 seeds, no method significantly beats `naive`.** With seeds 1–5 of `naive`, `meta_gate_only` and `oracle_soft` added, `arch_coev` leads `naive` by +6.7 pp (5/6 seeds, sign-flip p = 0.22). The single-seed comparisons came from seed 0, the best seed for those baselines.
->
-> 3. **The unified one-server re-evaluation (2026-11-26, [RESEARCH.md §2.6](docs/RESEARCH.md), pre-registered in [docs/BLIND_PROTOCOL.md](docs/BLIND_PROTOCOL.md)) replaces the 6-seed numbers below.** Confirmatory `arch_coev − naive` = +6.7 pp (5/6 seeds, sign-flip p = 0.25): not established. The `meta_T0` comparison below came from a paired t-test and is descriptive. On blind relocated positions, the two co-evolution methods gain +19 to +22 pp per variant (6/6 seeds, descriptive) at 14 vs 6 search generations. The gain shrinks beyond the UTM limits and does not appear on held-out storage mechanisms.
-- **6-seed `GSB v2` matrix** (1,950 polar/antimeridian/GeoTIFF raster tasks, symmetric `26B-A4B`):
-  - Base `seed.py`: `30.7%` (`44.4%` lucky); static `handcrafted.py`: `35.1%` (`49.6%` error); inference-time `runtime_meta.py`: `57.1%` (`2.61` calls); `oracle_soft` (s0): `55.3%`.
-  - `darwinx_soft` (weak `dev_low`, 6 seeds): **`31.9 ± 1.2%`** (`50.3 ± 3.6%` lucky, `CompV 1.3%`) — **6/6 locked in**.
-  - `meta_T0` (fixed mid-latitude probe, 6 seeds): **`23.6 ± 5.2%`** (`41.2 ± 25.3%` error, `CompV 0.7%`) — **6/6 second-order UTM lock-in** at poles/antimeridian.
-  - `llm_judge` (static rubric, 6 seeds): **`39.5 ± 14.4%`** (`19.1%–56.2%`).
-  - `coev_tip_only` (Stage-2 from Stage-1 tip alone, 6 seeds): **`37.1 ± 17.7%`** (`3/6` breakout; verifier-upgrade hysteresis on `s1, s3, s4`).
-  - **`arch_coev` (Archive-Preserving Co-Evolution, Ours, 6 seeds)**: **`41.0 ± 13.6%` ALL / `44.0 ± 12.0%` Seen / `35.0 ± 18.0%` HO** (`5/6` breakout: `58.2 / 17.1 / 37.8 / 45.6 / 45.6 / 41.8%`) — leads all 6-seed methods and beats fixed `meta_T0` (`+17.4 pp` ALL by paired t-test; descriptive under the unified analysis, +17.2 pp, sign-flip p = 0.062), slashes `Lucky` vs `darwinx_soft` by `-31.2 pp` (`50.3% → 19.1%`), and lifts `CompV` **16.2×** (`1.3% → 21.1%`).
-- **Zero-shot real OpenStreetMap 4-city transfer** (`data/osm_eval/`, 24 tasks across Singapore `1.29°N`, Xuzhou `34.26°N`, Helsinki `60.17°N`, Tromsø `69.65°N`): `seed.py` `41.7%` → weak `darwinx_soft` **`29.2%`** (`70.8%` silent wrong) → 6-seed `arch_coev` **`86.1 ± 26.2%`** (`0.0%` error, **5/6 seeds at `91.7%–100.0%`**; seed-0 `stage2_coev` `100.0%`).
-- **GSB v2 Two-Timescale Weight Internalization & Gen-2 Compounding (`runs/v8_s4_wave2_v2/`, `train[20:60]`, 100% open-weight `26B-A4B`)**:
-  - `SFT-Weak` (bare `seed.py`, 1.00 call): **`30.4%`** GSB v2 (`Lucky 48.0%`, `CompV 1.1%`) / **`12.5%`** real OSM (`0/12` Helsinki/Tromsø, `70.8%` silent wrong).
-  - `SFT-Meta` (bare `seed.py`, 1.00 call): **`56.2%`** GSB v2 (`CompV 69.4%`) / **`79.2%`** real OSM (`12/12` Helsinki/Tromsø).
-  - `+GRPO-Metamorphic` (24 steps w/ 3 certified probes, bare `seed.py`, 1.00 call): **`62.4%`** ALL / **`60.0%`** HO / **`83.3%`** `CompV` / **`91.7%`** real OSM (`0.0%` error, `+79.2 pp` over `SFT-Weak`).
-  - **Gen-2 Compounding** (`grpo_meta_final` + zero-GIS-rule generic retry, 1.09 calls): **`68.2%`** ALL / **`69.3%`** HO / **`0.7%`** error (`+5.3 pp` ALL and `+9.3 pp` HO above the multi-turn Gen-1 Teacher `62.9% / 60.0%`) and **`100.0%` (24/24)** real OSM (`1.04` calls).
-- **Non-GIS `SciUnits` (`eval280`, 3 seeds)**: Under `gemini-4-hydrogen → 26B` (domain-neutral prompt), `darwinx_soft` locks in `3/3` seeds at **`7.1 ± 0.0%` (`0.0%` HO, `91.4%` lucky)**, whereas `meta_soft` autonomously discovers dynamic `metadata.json` unit/calibration/sentinel loading (`s2` breaks out to **`18.2%` ALL / `13.3%` HO / `0.0%` error / `0.0%` silent wrong**, exposing the same static-verifier coverage boundary on Imperial units).
-- **External `GeoAnalystBench` zero-shot transfer (`n=17`, `max_tokens=4096`, `100% syntax_ok`)**: Base `26B` `strict_geo_sound = 76.5%` (`dynamic_crs_vec = 0.0%`) → `SFT-Weak` degrades to **`64.7%`** (`raster_nodata_safe 75.0% → 37.5%`) → **`SFT-Meta` `88.2%`** / **`GRPO-Meta` `82.3%`** (both lifting `dynamic_crs_vec` from **`0.0% → 71.4%`** and cutting `uses_3857` `5.9% → 0.0%`).
+The same saved Protocol A scripts were re-run offline:
+- on **blind relocations**: 8 positions per task, drawn area-uniformly in four latitude bands without reference to the probes;
+- on **held-out storage mechanisms**: the `low` scene stored in a convention no probe writes.
 
-## Repository Layout
+Values are the share of variants answered correctly.
+
+| Test set / stratum | `naive` | `coev_tip_only` | `arch_coev` | `arch_coev − naive` (pp) [t₅ 95%] |
+|---|---:|---:|---:|---|
+| Designed variants (`high`, `polar`, antimeridian) | 40.7 | 56.0 | 59.5 | +18.8 [+8.2, +29.3] |
+| Blind, all positions | 43.0 | 61.8 | 65.4 | +22.4 [+11.7, +33.2] |
+| Blind, ≥ 15° from every probe latitude | 43.7 | 67.1 | 64.9 | +21.2 [+11.2, +31.2] |
+| Blind, UTM-valid zone | 36.6 | 71.6 | 69.9 | +33.3 [+17.5, +49.1] |
+| Blind, polar zone (beyond 84°N / 80°S) | 31.2 | 43.7 | 39.0 | +7.7 [−2.1, +17.5] |
+| Blind, large-extent families | 70.9 | 31.8 | 67.3 | −3.6 [−34.0, +26.8] |
+| Held-out, near transfer (US-ft, Albers, NaN nodata) | 56.5 | 60.3 | 60.7 | +4.3 [−5.5, +14.1] |
+| Held-out, `us_ft` only | 56.7 | 64.0 | 67.5 | +10.9 [+1.5, +20.3] |
+| Held-out, `nodata_nan` only | 41.5 | 43.5 | 42.6 | +1.1 [−14.3, +16.5] |
+| Held-out, `csv_lon360` (adjacent) | 66.2 | 53.5 | 57.1 | −9.1 [−34.0, +15.9] |
+| Held-out, `raster_southup` (far; E2 confirmatory) | 71.8 | 74.2 | 72.3 | +0.5 [−11.6, +12.6], uninformative |
+
+- **Archive preservation adds little here:** `arch_coev − coev_tip_only` is +3.7 pp on blind positions (p = 0.44). The fixed mid-latitude `meta_T0` already reaches 63% in the UTM-valid zone (+26.5 over `naive`), while it collapses at the poles (25%) and on large extents (31%).
+- **Why the blind gain (+22.4) is larger than the strict gain (+6.7).** Recomputed on the same records, it happens in three steps:
+  1. Scoring per variant instead of all-or-nothing: +6.7 → +13.6.
+  2. Dropping `low`, where `arch_coev` is slightly behind: +13.6 → +18.8.
+  3. Fewer polar scenes in the blind set: +18.8 → +22.4.
+- **The far-transfer comparison is uninformative by design.** Rasterio reads south-up rasters transparently, so ≥ 98.8% of `low`-correct scripts keep working under it for every method. Two other far-transfer candidates failed the pre-registered calibration rule for the same reason.
+
+## Other results
+
+**Weight internalization** (GSB v2, `train[20:60]`, LoRA on `gemma-4-26B-A4B-it`; [RESEARCH.md §2.5](docs/RESEARCH.md)):
+- **The earlier `SFT-Weak` vs `SFT-Meta` gap is a teacher effect.** With the same `stage2_coev` teacher, weak filtering matches metamorphic filtering: Protocol A 60.2 vs 58.2%, Protocol B 50.2 vs 50.2%.
+- **On bare-model data, the filter helps only on real OpenStreetMap.** On the 8-city set (96 tasks), `sft_base_meta` beats `sft_base_weak` by +16.7 pp [+2.1, +33.3], using a third of the data. On GSB v2 the two are within noise.
+- **GRPO reward and training length:**
+  - weak-reward and metamorphic-reward GRPO end within noise of each other;
+  - 5 SFT epochs match or beat GRPO;
+  - every model distilled from the strong teacher drops to 0% on `large_region_area_v2` and `large_route_length_v2`.
+
+**Gate audit** ([RESEARCH.md §2.4](docs/RESEARCH.md)):
+- On 1,384 unfiltered scripts, the full gate rejects 5.8–20.4% of oracle-correct scripts and accepts 0.8–8.5% of wrong ones.
+- 15 of the 96 false rejections are gate errors:
+  - a probe that changes the reference answer (6);
+  - polar-probe polygons not split at the antimeridian (8);
+  - a tolerance tighter than the oracle's (1).
+
+  The probes for E1 fix the last two.
+- Most other rejections are scripts that break on inputs the benchmark never tests: mixed CRSs, km or projected storage, polar scenes.
+- On real OpenStreetMap, the relocating probes reject correct answers to absolute-position questions (northernmost-building latitude: 0/8 pass).
+
+**Earlier, exploratory results** (single runs or few seeds, before the review; [RESEARCH.md §2–2.3](docs/RESEARCH.md)):
+- **GSB v1, 4 seeds, `gemma-4-E4B-it`:** `metamorphic` 78.4 ± 3.8% vs `naive` 66.9 ± 22.7% vs DarwinX-style `preserve` 52.1 ± 22.4%; 2.1% lucky against 18.6% and 24.6%.
+  - The built-in probes relocate to 58.3° / −56.2°, inside the `high` test band (52–64°). This is the overlap the blind protocol was designed to test on GSB v2.
+  - With 4 seeds, `metamorphic − preserve` gives paired t p = 0.09.
+  - The v0.2 runs included a short domain hint in the gate diagnostics, later removed. Without any diagnostic text, `meta_gate_only` reached 80.8 ± 2.0% (3 seeds).
+- **GSB v1 polar stress test (86.5°N / 85.5°S):** the `metamorphic` harnesses converged to `estimate_utm_crs()` and fail loudly beyond the UTM range (83.7% errors, 2.7% silent wrong), rather than returning distorted numbers.
+- **Real OpenStreetMap, 4 cities, 24 tasks:** `arch_coev` 86.1 ± 26.2% over 6 seeds (5/6 seeds at 91.7–100%), against 29.2% for `darwinx_soft`. Not re-run on the unified server.
+- **`SciUnits` (non-GIS, 3 seeds) and `GeoAnalystBench` (17 tasks):** single small-sample results, reported in [RESEARCH.md §2.3](docs/RESEARCH.md).
+
+## Next: E1, teacher-free best-of-K distillation
+
+[docs/NEXT_EXPERIMENTS.md](docs/NEXT_EXPERIMENTS.md) fixes the design before any data:
+- The bare model samples K = 16 candidate scripts per training task.
+- One arm keeps a candidate that passes the weak check. The other keeps a candidate that also passes the fixed gate. The two arms draw with common random numbers.
+- 6 replicate LoRA pairs, all trained from that one candidate pool.
+
+The confirmatory test is `bok_meta − bok_weak` on Protocol A, an exact sign-flip test over the 6 replicates. A data-link test checks whether the gate-filtered pool is actually cleaner. The runner is `scripts/rebuttal/run_e1_bok.py` and the analysis `scripts/rebuttal/e1_summary.py`; both are committed.
+
+## How the evidence was produced
+
+- **Pre-registration.** Every analysis behind the status above was written down and committed before its data were read:
+  - [docs/BLIND_PROTOCOL.md](docs/BLIND_PROTOCOL.md): the blind test set, the unified re-evaluation, and Addenda 1–4;
+  - [docs/NEXT_EXPERIMENTS.md](docs/NEXT_EXPERIMENTS.md): E1, E2, and Amendments 1–3.
+
+  Every later change is a dated addendum, which states what had been seen when it was written.
+- **Review.** [docs/REVIEW.md](docs/REVIEW.md) is a simulated top-venue review of an earlier state of the project (3/10). Several rounds of independent review followed: each point was checked against the raw records before it was adopted, and the corrections are recorded in RESEARCH.md.
+- **Data.** `data/` and `runs/` are not in the repository. The benchmarks are rebuilt deterministically with the commands below, and the paths quoted in the docs refer to local artifacts.
+- **Scoring environment.** Blind and held-out scores ran on hosts with identical library versions (Addendum 4). A cross-check of local against cloud scoring had found 38 disagreements in 26,290 runs.
+
+## Benchmarks
+
+**GSB v1** (`benchmarks/gsb`, `data/v1`):
+- 21 families (18 seen, 3 held-out).
+- Every task places the same local geometry at 3 locations: `low` (within ±7° of the equator, where Web Mercator passes by luck), `high` (52–64°) and `zone_edge` (on a UTM zone boundary).
+- The test set has 480 tasks. Ground truth comes from a local AEQD projection, or `pyproj.Geod` for large extents.
+
+**GSB v2** (`benchmarks/gsb_v2`, `data/v2`):
+- 1,950 tasks, 20 families (15 seen, 5 held-out) in 4 groups:
+  - multi-step vector pipelines;
+  - raster/DEM + vector workflows (GeoTIFF with nodata);
+  - large-extent geodesic tasks;
+  - non-projection controls.
+- Local tasks have `low`, `high`, `polar` (85–87°) and antimeridian variants. Raster tasks skip the antimeridian variant, and large-extent tasks use `low`, `mid` and `zone_edge`.
+- The test set has 450 tasks (300 seen, 150 held-out).
+- The audit is in [docs/gsb_v2_audit.log](docs/gsb_v2_audit.log): the reference passes 1,950/1,950, a UTM script 0/1,950, and a Web Mercator script 0/1,710 on the projection, raster and large-extent families.
+
+**Blind relocation** (`benchmarks/gsb_v2/build_blind.py`, `data/v2_blind`):
+- 8 positions per test task, 3,553 scored variants.
+- Local families get 2 positions per |latitude| band (0–30°, 30–60°, 60–80°, 80–89°), area-uniform within the band. Large families are area-uniform over their valid range.
+
+**Held-out mechanisms (E2)** (`benchmarks/gsb_v2/build_heldout_mech.py`, `data/v2_heldout_mech`):
+- 1,705 scored variants. Each stores the `low` scene in a different convention:
+  - near: US-survey-foot TM, local Albers, NaN nodata;
+  - adjacent: CSV longitudes in [0, 360);
+  - far: south-up GeoTIFF;
+  - descriptive: Z = 0 vectors, multi-part geometries.
+
+**Real OpenStreetMap:**
+- `data/osm_eval`: 4 cities, 24 tasks.
+- `data/osm_global`: 8 cities × 12 templates, 96 tasks.
+
+**`SciUnits`** (`benchmarks/sci_units`): a non-GIS benchmark with 12 families of unit, calibration and missing-sentinel invariance.
+
+**Scoring:**
+- A real-valued answer is correct within 1% of the truth; counts must be exact.
+- Categories:
+  - `correct`: every variant right;
+  - `lucky`: some right;
+  - `silent_wrong`: runs everywhere, wrong everywhere;
+  - `error`: exception, timeout or no numeric output.
+
+## Repository layout
 
 ```text
 meta-rsi/
-├── meta_rsi/                   # Core RSI framework
-│   ├── llm.py                  # Multi-backend LLM wrapper (openai-compat, gemini-cli, gemini-rest, mock)
-│   ├── sandbox.py              # AST validator, dynamic harness loader, clean-copy sandbox & call cap
-│   ├── metamorphic.py          # Label-free invariance operators T(x) (AEQD shift, isometry, CRS flip, tabular)
-│   ├── evaluator.py            # Dual-view evaluator (in-loop weak verifier vs hidden 3-location oracle)
-│   ├── archive.py              # Lineage archive, parent/recombination selection, gating policies
-│   ├── meta_agent.py           # Domain-neutral Meta-Agent proposer
-│   ├── evolve.py               # Main RSI evolution loop CLI
-│   ├── harnesses/
-│   │   └── seed.py             # Gen-0 seed Agent Harness (`solve(task_prompt, work_dir, llm_call, run_python)`)
-│   ├── eval/                   # Evaluation & statistical reporting CLIs
-│   │   ├── eval_test.py        # Unseen test-set evaluator (full 480 or stratified)
-│   │   ├── eval_ood.py         # Polar OOD (>84N / <80S, UTM-undefined) stress-test evaluator
-│   │   ├── report.py           # Side-by-side single-run summary
-│   │   ├── stats.py            # Multi-seed aggregation & lock-in stats
-│   │   └── analysis.py         # Paired t-tests, category breakdowns & publication tables
-│   └── infra/                  # Cloud GPU / Colab G4 utilities
-│       ├── colab_g4.py         # One-command Colab G4 bundle & launcher
-│       └── start_g4_vllm.py    # Remote G4 vLLM server bootstrap
+├── meta_rsi/
+│   ├── evolve.py               # evolution loop CLI
+│   ├── meta_agent.py           # domain-neutral meta-agent
+│   ├── archive.py              # lineage archive, parent selection, gating policies
+│   ├── evaluator.py            # in-loop weak verifier + metamorphic gate vs hidden oracle
+│   ├── metamorphic.py          # built-in invariance probes T(x)
+│   ├── verifier_agent.py       # probe proposal and self-certification
+│   ├── sandbox.py              # AST validation, harness loading, sandboxed execution
+│   ├── llm.py                  # LLM backends (OpenAI-compatible / vLLM, Gemini, mock)
+│   ├── harnesses/seed.py       # generation-0 harness
+│   ├── training/               # trajectory collection, SFT/GRPO two-timescale training, LoRA sync
+│   ├── eval/                   # test-set / polar evaluators, multi-seed and unified summaries, tables
+│   └── infra/                  # Colab G4 vLLM launchers
 ├── benchmarks/
-│   └── gsb/                    # Geospatial Silent-Error Benchmark (21 families, 3-location oracle)
-│       ├── geo.py              # Location variants & local-metre AEQD placement on WGS84
-│       ├── families.py         # 21 GIS task families (18 seen + 3 held-out) & reference solvers
-│       ├── build.py            # Dataset generator (`tasks.jsonl` + variant workspaces)
-│       ├── harness.py          # Code extraction, 3-variant execution & scoring
-│       └── audit.py            # Method separability audit (reference, UTM, EPSG:3857, fixed UTM)
-├── scripts/                    # Zero-shot baseline, error-classification & plotting utilities
-│   ├── zero_shot.py            # vLLM zero-shot baseline sampling & scoring
-│   ├── classify_errors.py      # Rule-based silent-error fingerprinting
-│   ├── classify_llm.py         # Gemini Decisions API error classification
-│   ├── caught_exceptions.py    # Detect scripts that swallowed runtime exceptions
-│   ├── check_aeqd_truth.py     # Verify AEQD vs ellipsoidal geodesic ground-truth agreement
-│   └── plot_figures.py         # Generate SVG figures into docs/figures/
-├── tests/                      # Unit & end-to-end tests (`test_gsb.py`, `test_meta_rsi.py`)
-├── docs/                       # Living research docs, baseline audit & SVG figures
-│   ├── RESEARCH.md             # Master research plan, experiment log & roadmap
-│   ├── LITERATURE.md           # Unified literature survey & positioning matrix
-│   ├── GSB_V1_BASELINE.md      # Complete GSB v1 zero-shot & silent-error report
-│   ├── INFRA_AND_GOTCHAS.md    # Compute inventory, budgets & Colab G4 runbook
-│   ├── gsb_v1_audit.log        # Method-separability audit log across all 21 families
-│   └── figures/                # Generated SVG plots (`fig_outcomes`, `fig_mercator`, `fig_rsi_gates`, `fig_polar_ood`)
-├── pyproject.toml              # Package metadata & pytest configuration
-└── shell.nix                   # Reproducible NixOS geospatial Python environment
+│   ├── gsb/                    # GSB v1
+│   ├── gsb_v2/                 # GSB v2, blind relocation, held-out mechanisms, OSM builders
+│   └── sci_units/              # SciUnits (non-GIS)
+├── scripts/
+│   ├── rebuttal/               # unified re-evaluation, blind/E2 scoring, gate audits, E1 runner and analysis
+│   ├── wave_s4_2/              # GSB v2 weight-internalization runs
+│   └── *.py                    # zero-shot baselines, error classification, figures
+├── tests/                      # pytest suite
+├── docs/
+│   ├── RESEARCH.md             # experiment log, verified results, risk tracker, roadmap
+│   ├── BLIND_PROTOCOL.md       # pre-registered blind / unified analysis and addenda
+│   ├── NEXT_EXPERIMENTS.md     # pre-registered E1 / E2 and amendments
+│   ├── REVIEW.md               # simulated top-venue review (Chinese)
+│   ├── LITERATURE.md           # literature survey and positioning
+│   ├── GSB_V1_BASELINE.md      # GSB v1 zero-shot baselines and error taxonomy
+│   ├── INFRA_AND_GOTCHAS.md    # compute, budgets, Colab runbook
+│   └── gsb_v{1,2}_audit.log    # benchmark separability audits
+├── pyproject.toml
+└── shell.nix                   # reproducible NixOS geospatial environment
 ```
 
-## Quick Start
+## Quick start
 
-Enter the reproducible geospatial Python environment (or install dependencies from `pyproject.toml`):
+Enter the environment (or install from `pyproject.toml`):
 
 ```bash
 nix-shell
 ```
 
-### 1. Build & Audit the Geospatial Silent-Error Benchmark (`benchmarks/gsb`)
+Build and audit GSB v2:
 
 ```bash
-python -m benchmarks.gsb.build --out data/v1 --train 150 --test 20 --heldout 40 --seed 0
-python -m benchmarks.gsb.audit data/v1
+python -m benchmarks.gsb_v2.build --out data/v2 --train 100 --test 20 --heldout 30 --seed 0
 ```
-
-### 2. Run RSI Harness Evolution
 
 ```bash
-python -m meta_rsi.evolve \
-    --exp my_meta_run \
-    --gate metamorphic \
-    --generations 4 \
-    --dev-per-family 2 --dev-offset 0 \
-    --task-backend openai-compat --task-url http://127.0.0.1:18000/v1 \
-    --task-model google/gemma-4-E4B-it --task-temp 0.0 --task-no-think \
-    --meta-backend gemini-cli --meta-model gemini-4-hydrogen \
-    --meta-thinking-level low --meta-max-tokens 16384
+python -m benchmarks.gsb_v2.audit data/v2
 ```
 
-### 3. Evaluate on Unseen Test Split, Polar OOD & Generate Reports / Figures
+Build the blind and held-out-mechanism test sets:
 
 ```bash
-python -m meta_rsi.eval.eval_test \
-    --harness runs/my_meta_run/gen_004/harness.py \
-    --out runs/eval480/my_meta_run.json \
-    --task-no-think
-
-# Polar OOD stress test (>84N / <80S, disjoint from metamorphic targets, breaks estimate_utm_crs)
-python -m meta_rsi.eval.eval_ood \
-    --harness runs/my_meta_run/gen_004/harness.py \
-    --out runs/eval_ood/my_meta_run.json \
-    --task-no-think --seen-per-family 0 --heldout-per-family 0 --track-caught
-
-python -m meta_rsi.eval.stats runs/v3_gis_s*
-python -m meta_rsi.eval.analysis runs/eval480 --ood-dir runs/eval_ood
-
-# Regenerate SVG figures into docs/figures/
-nix-shell -p "python3.withPackages(ps:[ps.matplotlib ps.numpy])" --run "python scripts/plot_figures.py"
+python -m benchmarks.gsb_v2.build_blind
 ```
-
-### 4. Run Tests
 
 ```bash
-python -m pytest -q tests
+python -m benchmarks.gsb_v2.build_heldout_mech
 ```
 
-## Geospatial Silent-Error Benchmark (`benchmarks/gsb`)
+Evolve a harness (GSB v2, metamorphic gate, the same vLLM-served model as task and meta model). The certified probes and the two-stage co-evolution are set up by the run scripts under `scripts/`:
 
-Each task places identical local geometry at three locations on the globe; a script must answer accurately on all three variants to count as `correct`.
+```bash
+python -m meta_rsi.evolve --exp my_run --data-root data/v2 --gate metamorphic --generations 6 \
+    --task-backend openai-compat --task-url http://127.0.0.1:8000/v1 --task-model google/gemma-4-26B-A4B-it --task-no-think \
+    --meta-backend openai-compat --meta-url http://127.0.0.1:8000/v1 --meta-model google/gemma-4-26B-A4B-it --meta-no-think
+```
 
-| Variant | Center | Why |
-|---|---|---|
-| `low` | latitude within ±7° | `EPSG:3857` distortion < 0.75% in length (< 1.51% in area, < 1% within ±5.7°), so Web Mercator passes most `low` tasks by luck |
-| `high` | latitude ±52–64° | `EPSG:3857` inflates lengths 1.6–2.3× (areas 2.5–5×) |
-| `zone_edge` | latitude ±25–45°, on a UTM zone boundary | data straddles two zones; breaks any hard-coded UTM zone |
+Evaluate a harness on the test split (Protocol A):
 
-- **Ground truth**: Local tasks (extent < 30 km) use an AEQD projection centred on the bounding box (verified within 0.0001% of `pyproj.Geod` via `python -m scripts.check_aeqd_truth`). Large-extent tasks use `pyproj.Geod` on WGS84 directly. Prompts never state location or CRS; 25% of `.gpkg` layers are stored in a local UTM CRS, and point layers can be CSV with `lon`/`lat`.
-- **Families (21 total)**:
-  - *Seen (18)*: `buffer_union_area`, `count_within`, `mean_nn_distance`, `sum_within`, `nearest_facility_max`, `area_by_class`, `perimeter_by_class`, `overlay_area`, `centroid_distance`, `road_length_by_type`, `count_near_roads`, `roads_in_district`, `points_in_polygon`, `area_weighted_population`, `covered_population`, `mean_per_district`, `large_region_area`, `large_route_length`.
-  - *Held-out (3)*: `density_in_polygon`, `road_buffer_area`, `max_pair_distance`.
-- **Scoring**: Real answers within 1% of truth, counts exact. Categories: `correct` (all 3 right), `lucky` (runs everywhere, right on some variants only), `silent_wrong` (runs everywhere, wrong everywhere), `error` (exception, timeout, or non-numeric output), `no_code`.
-- **Audit**: See [docs/gsb_v1_audit.log](docs/gsb_v1_audit.log) for method-separability verification across all 21 families.
+```bash
+python -m meta_rsi.eval.eval_test --harness runs/my_run/gen_006/harness.py --data-root data/v2 --out runs/eval/my_run.json --task-no-think
+```
+
+Reproduce the unified, blind and held-out summaries from a finished `runs/v10_unified_6seed/`:
+
+```bash
+python -m meta_rsi.eval.unified_summary runs/v10_unified_6seed --ref naive
+```
+
+```bash
+python scripts/rebuttal/score_blind.py summary
+```
+
+```bash
+python scripts/rebuttal/score_blind.py --blind data/v2_heldout_mech summary
+```
+
+Run the tests:
+
+```bash
+python -m pytest -q
+```
+
+## Documentation
+
+- [docs/RESEARCH.md](docs/RESEARCH.md): the experiment log with every verified result, the methodological risk tracker, and the roadmap.
+- [docs/BLIND_PROTOCOL.md](docs/BLIND_PROTOCOL.md) and [docs/NEXT_EXPERIMENTS.md](docs/NEXT_EXPERIMENTS.md): the pre-registered analyses.
+- [docs/LITERATURE.md](docs/LITERATURE.md): related work on harness evolution, GeoAI benchmarks, silent errors and spurious correctness.
+- [docs/GSB_V1_BASELINE.md](docs/GSB_V1_BASELINE.md): GSB v1 zero-shot baselines and the error taxonomy.
+- [docs/INFRA_AND_GOTCHAS.md](docs/INFRA_AND_GOTCHAS.md): compute inventory and runbook.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
