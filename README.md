@@ -45,6 +45,9 @@ Full tables, paired statistics, and audit notes live in [docs/RESEARCH.md](docs/
 - **Direct GRPO on E4B (60 steps, 1,920 rollouts)**: `GRPO-Weak` increases unseen spurious passes (`31.2% → 38.3%`) while degrading held-out accuracy (`27.5% → 24.2%`); `GRPO-Metamorphic` blocks `389/1,920` shortcuts (`29.8%` lucky) but exposes a sparse-reward exploration bottleneck from scratch (`27.1%` ALL).
 
 ### 2. 100% Open-Weight Two-Timescale RSI (`gemma-4-26B-A4B-it`, `GSB v1`, `n=480`)
+
+> **Caveat (2026-11-26, [RESEARCH.md §2.5, R7](docs/RESEARCH.md)).** `SFT-Weak` and `SFT-Meta` below were distilled from different teachers (`darwinx_soft` trajectories vs. the `meta_neutral` seed-1 harness), so their gap does not isolate the filter. The same-teacher control was run on GSB v2 only, where weak and metamorphic filtering gave 60.2% vs. 58.2% (Protocol A); see the Corrections under section 3.
+
 Single complete closed-loop run using zero closed APIs, zero 3-location oracle labels in training/evolution, and strictly disjoint dev / distillation / test splits (`runs/v5_two_timescale/`):
 
 | Stage | Model Weights | Eval Harness | Calls | **Test ALL (`n=480`)** | **Held-out (`n=120`)** | **`Lucky`** | **`Err`** |
